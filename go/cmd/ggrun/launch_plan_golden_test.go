@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -23,8 +22,8 @@ import (
 
 // Golden launch plans over a synthetic hardware matrix (review W11, step 1).
 //
-// Each case is planned through the same steps, in the same order, that
-// cmdDryRun --emit-server-argv-json runs, and records the same
+// Each case is planned by planLaunch, the function cmdDryRun
+// --emit-server-argv-json calls, and records the same
 // ggrun-server-plan-v1 fields: backend, server argv, environment additions and
 // memory limit. The W11 planLaunch refactor must leave this file unchanged.
 //
@@ -41,8 +40,8 @@ import (
 //
 // and the logged sha256 checks the result.
 //
-// cmdDryRun cannot run in a test as is. Three inputs are injected, and these
-// are the seams planLaunch needs:
+// cmdDryRun cannot run in a test as is. Three of planLaunch's inputs are
+// injected (goldenPlanInputs):
 //   - hardware: an --inventory file, read by loadInventory as dry-run does; the
 //     detect.Detect call before it is skipped (it would probe this host).
 //   - model: a synthetic ModelProfile stands in for parseModel, which needs a
@@ -56,8 +55,8 @@ import (
 // VRAM and live usage are stubbed from the inventory), the Vulkan device
 // listing (the fixtures are CUDA backends; a call fails the test), draft-model discovery (speculation
 // stays off) and the "Model does not fit" process hint of placementErrorMessage
-// (the raw error is recorded). Until planLaunch exists this guards the pieces
-// cmdDryRun calls, not cmdDryRun's own ordering.
+// (the raw error is recorded). The console golden
+// (dry_run_console_golden_test.go) runs cmdDryRun itself.
 
 var updateGoldenPlans = flag.Bool("update-launch-plans", false, "rewrite testdata/launch_plans_golden.json")
 
@@ -405,7 +404,7 @@ func goldenPlanDryRun(t *testing.T, c goldenPlanCase) goldenPlanRecord {
 	if record.Args == nil {
 		record.Args = []string{}
 	}
-	// applyGPUVisibility exports these process-wide; start each run without them.
+	// The launch exports these process-wide; start each run without them.
 	for _, key := range []string{"CUDA_VISIBLE_DEVICES", "GGML_VK_VISIBLE_DEVICES"} {
 		if err := os.Unsetenv(key); err != nil {
 			t.Fatal(err)
@@ -426,74 +425,89 @@ func goldenPlanDryRun(t *testing.T, c goldenPlanCase) goldenPlanRecord {
 		record.Outcome, record.Error = "parse-error", err.Error()
 		return record
 	}
-	caps, err := loadInventory(req.InventoryPath)
-	if err != nil {
-		t.Fatalf("%s: inventory: %v", c.name, err)
-	}
-	cfg, err := config.Load() // loadConfigOrExit
+	cfg, err := config.Load() // the config planLaunch loads
 	if err != nil {
 		t.Fatalf("%s: config: %v", c.name, err)
 	}
 	if cfg.CacheDir != cacheDir {
 		t.Fatalf("%s: cache dir %q, want the case's own %q", c.name, cfg.CacheDir, cacheDir)
 	}
-	req.ModelPath = resolveModelPath(req.ModelPath, cfg.ModelDir)
-	warnModelCompatibility(model) // model stands in for parseModel
-
-	be := goldenPlanBackend(t, c.backend)
-	// resolveLaunchBackend after selection; normalizeArchKVRequest is the part
-	// of auto selection that edits the request.
-	normalizeArchKVRequest(req, model)
-	applyBackendFeatureCompatibility(req, model, be)
-	preflightBackendArch(model, be, caps, req.AppHome)
-
-	applyCachedBackendCapabilities(req, cfg.CacheDir, model, be)
-	applyRememberedClaudeSelfClassify(req, cfg.CacheDir, model, caps, io.Discard)
-	req.ReviewerReservation = claudeReviewerReservation(req, caps, cfg.CacheDir)
-
-	placementOpts := placementOptionsFromRequest(req, model, be, cfg.CacheDir)
-	strategy, err := placement.Compute(caps, model, placementOpts)
-	if err != nil {
-		record.Outcome, record.Error = "placement-error", err.Error()
+	plan, planErr := planLaunch(req, goldenPlanInputs(t, c.name, model, goldenPlanBackend(t, c.backend), nil))
+	if planErr != nil {
+		if !goldenPlanIsPlacementError(planErr) {
+			t.Fatalf("%s: %s", c.name, planErr.Message)
+		}
+		record.Outcome, record.Error = "placement-error", planErr.Err.Error()
 		return record
 	}
-	claudeCodeSlotAdjust(strategy, model, req.ClaudeCode, req.ParallelSet, req.BatchSizeSet, req.UBatchSizeSet)
-	strategy = applyCalibrationDecision(req, cfg, model, be, caps, strategy)
-	strategy = explainServingOptimization(req, cfg, model, be, caps, strategy, true)
-	if refusal := dryRunFitRefusal(strategy); refusal != "" {
-		record.Outcome, record.Error = "fit-refusal", refusal
+	if plan.Refusal != nil {
+		record.Outcome, record.Error = "fit-refusal", plan.Refusal.Message
 		return record
-	}
-
-	serverArgs := buildLaunchServerArgs(req, cfg, be, caps, model, strategy)
-	envPrefix := applyGPUVisibility(req, backendDialect(be))
-	noVulkan := func(string) ([]listedDevice, error) {
-		t.Fatalf("%s: a CUDA fixture listed Vulkan devices", c.name)
-		return nil, nil
-	}
-	if vkEnv, vkErr := vulkanDeviceOrderEnv(req, be, caps, noVulkan); vkErr != nil {
-		t.Fatalf("%s: vulkan device order: %v", c.name, vkErr)
-	} else if vkEnv != "" {
-		envPrefix = vkEnv
 	}
 	record.Outcome = "plan"
-	record.Plan = &goldenPlanJSON{
-		Schema:               "ggrun-server-plan-v1",
-		ModelPath:            req.ModelPath,
-		BackendTag:           be.Tag,
-		BackendID:            be.Identity,
-		ClaudeProfile:        effectiveClaudeProfile(req),
-		LaunchScope:          claudeLaunchLogScope(req, model, be, serverArgs),
-		MemoryMaxMB:          backendMemoryMaxMB(req, caps),
-		Environment:          launchPlanEnvironment(serverArgs, envPrefix, be.Path),
-		ServerArgv:           serverArgs,
-		Residency:            strategy.Residency,
-		Bottleneck:           strategy.OptimizationBottleneck,
-		ResourceLedger:       strategy.ResourceLedger,
-		OptimizationBoundary: strategy.OptimizationBoundary,
-		CachedOptimization:   req.AppliedCalibration,
-	}
+	record.Plan = goldenPlanJSONOf(plan)
 	return record
+}
+
+// goldenPlanInputs are planLaunch's inputs for a replay. Hardware is the
+// case's --inventory (Detect is not run: it would probe this host), the model
+// is the synthetic profile in place of parseModel, and the backend is the
+// fixture in place of selectBackendForModel; what resolveLaunchBackend does
+// after selection runs (normalizeArchKVRequest is the part of auto selection
+// that edits the request). beforeBackend runs first, at the point where the
+// dry run has the model and the hardware and has not resolved a backend. The
+// fixtures are CUDA backends, so a Vulkan listing fails the test. Notes are
+// dropped: the console golden pins them.
+func goldenPlanInputs(t *testing.T, name string, model *placement.ModelProfile, be *backendInfo, beforeBackend func(req *launchRequest, model *placement.ModelProfile, caps *detect.Capabilities)) planInputs {
+	t.Helper()
+	return planInputs{
+		Policy:    dryRunPlanPolicy,
+		Detect:    func() (*detect.Capabilities, error) { return &detect.Capabilities{}, nil },
+		Inventory: loadInventory,
+		Model:     func(string) (*placement.ModelProfile, error) { return model, nil },
+		ResolveBackend: func(req *launchRequest, m *placement.ModelProfile, caps *detect.Capabilities) *backendInfo {
+			if beforeBackend != nil {
+				beforeBackend(req, m, caps)
+			}
+			normalizeArchKVRequest(req, m)
+			applyBackendFeatureCompatibility(req, m, be)
+			preflightBackendArch(m, be, caps, req.AppHome)
+			return be
+		},
+		ListVulkan: func(string) ([]listedDevice, error) {
+			t.Fatalf("%s: a CUDA fixture listed Vulkan devices", name)
+			return nil, nil
+		},
+		Note: func(planNote) {},
+	}
+}
+
+// goldenPlanIsPlacementError reports whether planLaunch stopped at
+// placement.Compute; the replays record its raw error, without the
+// running-server hint placementErrorMessage may append.
+func goldenPlanIsPlacementError(e *planError) bool {
+	return e != nil && e.Code == 1 && e.Err != nil && strings.HasPrefix(e.Message, "Error computing placement: ")
+}
+
+// goldenPlanJSONOf maps a plan to the ggrun-server-plan-v1 fields cmdDryRun
+// encodes.
+func goldenPlanJSONOf(plan *launchPlan) *goldenPlanJSON {
+	return &goldenPlanJSON{
+		Schema:               "ggrun-server-plan-v1",
+		ModelPath:            plan.Req.ModelPath,
+		BackendTag:           plan.Backend.Tag,
+		BackendID:            plan.Backend.Identity,
+		ClaudeProfile:        effectiveClaudeProfile(plan.Req),
+		LaunchScope:          plan.LaunchScope,
+		MemoryMaxMB:          plan.MemoryMaxMB,
+		Environment:          plan.Environment,
+		ServerArgv:           plan.ServerArgv,
+		Residency:            plan.Strategy.Residency,
+		Bottleneck:           plan.Strategy.OptimizationBottleneck,
+		ResourceLedger:       plan.Strategy.ResourceLedger,
+		OptimizationBoundary: plan.Strategy.OptimizationBoundary,
+		CachedOptimization:   plan.Req.AppliedCalibration,
+	}
 }
 
 func TestGoldenPlanSyntheticMatrix(t *testing.T) {
