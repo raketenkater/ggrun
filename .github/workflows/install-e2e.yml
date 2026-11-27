@@ -232,10 +232,71 @@ jobs:
           XDG_RUNTIME_DIR="/run/user/$(id -u)"
           export XDG_RUNTIME_DIR
           for _ in $(seq 30); do [ -S "$XDG_RUNTIME_DIR/bus" ] && break; sleep 1; done
+          # Shared with the stop-during-load step: what is left of a stopped unit.
+          cat > "$RUNNER_TEMP/unit-diag.sh" <<'EOF'
+          ucg="/sys/fs/cgroup/user.slice/user-$(id -u).slice/user@$(id -u).service"
+          backend_scopes() { find "$ucg" -maxdepth 3 -type d -name 'ggrun-backend-*.scope' 2>/dev/null || true; }
+          scope_pids() { local sc; for sc in $(backend_scopes); do cat "$sc/cgroup.procs" 2>/dev/null || true; done; }
+          port_pids() { ss -ltnpH "sport = :$1" 2>/dev/null | grep -o 'pid=[0-9]*' | cut -d= -f2 | sort -u || true; }
+          # pid:comm:ppid of every process in a backend scope.
+          scope_members() {
+            local p out=""
+            for p in $(scope_pids); do
+              out="$out$p:$(cat "/proc/$p/comm" 2>/dev/null):$(awk '/^PPid:/{print $2}' "/proc/$p/status" 2>/dev/null) "
+            done
+            printf '%s' "${out:-none}"
+          }
+          answering() { curl -fs --max-time 1 "http://127.0.0.1:$1/health" >/dev/null 2>&1; }
+          proc_line() {
+            [ -r "/proc/$1/status" ] || return 0
+            printf '%s pgid=%s cg=%s %s| %s\n' "$1" "$(ps -o pgid= -p "$1" | tr -d ' ')" \
+              "$(cut -d: -f3 "/proc/$1/cgroup" 2>/dev/null)" \
+              "$(awk '/^(Name|State|PPid|SigBlk|SigIgn|SigCgt):/{printf "%s%s ", $1, $2}' "/proc/$1/status" 2>/dev/null)" \
+              "$(tr '\0\n' '  ' < "/proc/$1/cmdline" 2>/dev/null | cut -c1-160)"
+          }
+          # unit_diag PORT SINCE_EPOCH
+          unit_diag() {
+            local u p
+            echo "::group::diagnostics for port $1"
+            echo "--- ggrun unit journal since start"
+            journalctl --user -u ggrun -o short-unix --no-pager 2>/dev/null | awk -v s="$2" '$1+0 >= s' | tail -300 || true
+            echo "--- backend scope journal since start"
+            journalctl --user -u 'ggrun-backend-*' -o short-unix --no-pager 2>/dev/null | awk -v s="$2" '$1+0 >= s' | tail -40 || true
+            echo "--- unit status"
+            systemctl --user status ggrun --no-pager -l 2>&1 | head -30 || true
+            systemctl --user list-units --all --no-pager --plain 'ggrun*' 2>&1 || true
+            for u in $(systemctl --user list-units --all --no-legend --plain 'ggrun-backend-*' 2>/dev/null | awk '{print $1}'); do
+              systemctl --user status "$u" --no-pager -l 2>&1 | head -30 || true
+            done
+            echo "--- user cgroups"
+            systemd-cgls --no-pager "${ucg#/sys/fs/cgroup}" 2>&1 | head -60 || true
+            for u in $(backend_scopes); do echo "$u: $(tr '\n' ' ' < "$u/cgroup.procs" 2>/dev/null)"; done
+            echo "--- processes"
+            ps -eo pid,ppid,pgid,sid,etime,stat,args | cut -c1-220 | awk 'NR==1 || /ggrun|llama-server|scope-watch|systemd-run/' | grep -v -e ' awk ' -e unit-diag || true
+            echo "--- port listeners and scope members"
+            for p in $(port_pids "$1") $(scope_pids); do proc_line "$p"; done | sort -u || true
+            ss -ltnp "sport = :$1" 2>&1 || true
+            echo "::endgroup::"
+          }
+          # Explicit PIDs and unit names only; never a pattern kill.
+          cleanup_backends() {
+            local u p
+            if systemctl --user is-active --quiet ggrun; then systemctl --user kill -s KILL ggrun 2>/dev/null || true; fi
+            for u in $(systemctl --user list-units --all --no-legend --plain 'ggrun-backend-*' 2>/dev/null | awk '{print $1}'); do
+              timeout 20 systemctl --user stop "$u" 2>/dev/null || true
+            done
+            for p in $(port_pids "$1") $(scope_pids); do kill -KILL "$p" 2>/dev/null || true; done
+            for _ in $(seq 10); do answering "$1" || break; sleep 1; done
+            systemctl --user reset-failed 2>/dev/null || true
+          }
+          EOF
+          # shellcheck disable=SC1091
+          . "$RUNNER_TEMP/unit-diag.sh"
           mkdir -p ~/.config/systemd/user ~/.config/ggrun
           sed "s|%h/.local/bin/ggrun|$HOME/ggrun/ggrun|" examples/systemd/ggrun.service > ~/.config/systemd/user/ggrun.service
           printf 'GGRUN_MODEL=%s\nGGRUN_ARGS=--cpu --port 18849 --ctx 2048\n' "$MODEL" > ~/.config/ggrun/service.env
           systemctl --user daemon-reload
+          since="$(date +%s.%N)"
           systemctl --user start ggrun
           up=0
           for _ in $(seq 180); do
@@ -246,11 +307,171 @@ jobs:
           journalctl --user -u ggrun --no-pager | tail -40
           [ "$up" = 1 ] || { echo "::error::the user unit did not serve"; exit 1; }
           systemctl --user stop ggrun
-          if systemctl --user is-active --quiet ggrun; then echo "::error::unit still active after stop"; exit 1; fi
+          if systemctl --user is-active --quiet ggrun; then
+            unit_diag 18849 "$since"; cleanup_backends 18849
+            echo "::error::unit still active after stop"; exit 1
+          fi
           # The backend runs in its own memory scope; its watcher stops it a
           # few seconds after the launcher exits.
           for _ in $(seq 30); do curl -fs http://127.0.0.1:18849/health >/dev/null || break; sleep 1; done
-          if curl -fs http://127.0.0.1:18849/health >/dev/null; then echo "::error::server still answering 30s after stop"; exit 1; fi
+          if curl -fs http://127.0.0.1:18849/health >/dev/null; then
+            unit_diag 18849 "$since"; cleanup_backends 18849
+            echo "::error::server still answering 30s after stop"; exit 1
+          fi
+
+      # Diagnostic only: stop the unit at controlled moments of the launch and
+      # record whether the backend outlives its launcher.
+      - name: Stop during load (diagnostic)
+        if: ${{ !cancelled() && env.MODEL != '' }}
+        continue-on-error: true
+        timeout-minutes: 7
+        run: |
+          set -euo pipefail
+          XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          export XDG_RUNTIME_DIR
+          [ -f "$RUNNER_TEMP/unit-diag.sh" ] || { echo "::error::unit-diag.sh missing (systemd step did not run)"; exit 1; }
+          # shellcheck disable=SC1091
+          . "$RUNNER_TEMP/unit-diag.sh"
+          command -v strace >/dev/null || sudo apt-get install -y -qq strace >/dev/null || true
+          table="$RUNNER_TEMP/stop-during-load.tsv"
+          straces="$RUNNER_TEMP/wrapper-strace.tsv"
+          printf 'iter\tmoment\twrapper\tterms_received\treached_kill_KILL\twrapper_exit\n' > "$straces"
+          printf 'iter\tmoment\tport\tstop_s\thealthy_at_stop\tdown_10s\tdown_30s\tdown_after_s\toom_group\tscope_before_stop\tsurvivors\tlast_launcher_line\n' > "$table"
+          argv_shown=no
+          print_table() {
+            echo "=== stop-during-load summary"
+            column -t -s "$(printf '\t')" "$table" || cat "$table"
+            echo "=== per moment: tries, still answering at 10 s, at 30 s"
+            awk -F'\t' 'NR>1 { n[$2]++; if ($6=="no") a[$2]++; if ($7=="no") b[$2]++ } END { for (m in n) printf "%-16s %3d %3d %3d\n", m, n[m], a[m]+0, b[m]+0 }' "$table" | sort
+            echo "=== wrapper under strace (first-healthy, healthy+1s, kill-launcher)"
+            column -t -s "$(printf '\t')" "$straces" || cat "$straces"
+            awk -F'\t' 'NR>1 && $3!="-" { n++; if ($4+0 > 1) m++; if ($5=="yes") k++ } END { printf "traced tries %d, wrapper got more than one SIGTERM in %d, reached kill(-child, SIGKILL) in %d\n", n, m+0, k+0 }' "$straces"
+            { echo '### Stop during load'; echo '```'; column -t -s "$(printf '\t')" "$table" || cat "$table"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          }
+          # Also on an abort or the step timeout: leave no unit, process or port
+          # behind for the later steps.
+          on_exit() {
+            set +e
+            cleanup_backends "${port:-0}"
+            systemctl --user stop ggrun 2>/dev/null
+            systemctl --user reset-failed 2>/dev/null
+            print_table
+          }
+          trap on_exit EXIT
+          trap 'exit 130' INT TERM HUP
+          step_start=$SECONDS
+          i=0
+          # Controls first, then cycle the stop moments around readiness until
+          # the time budget is spent: a rare race needs many attempts.
+          controls=(start start+0.5s server-running)
+          cycle=(first-listen first-healthy healthy+0.2s healthy+1s like-unit-step kill-launcher)
+          while :; do
+            if [ "$i" -lt "${#controls[@]}" ]; then moment="${controls[$i]}"
+            else moment="${cycle[$(( (i - ${#controls[@]}) % ${#cycle[@]} ))]}"; fi
+            if [ $((SECONDS - step_start)) -gt 180 ]; then echo "time budget reached after $i iterations"; break; fi
+            i=$((i+1)); port=$((18860 + i))
+            printf 'GGRUN_MODEL=%s\nGGRUN_ARGS=--cpu --port %s --ctx 2048\n' "$MODEL" "$port" > ~/.config/ggrun/service.env
+            systemctl --user reset-failed ggrun 2>/dev/null || true
+            since="$(date +%s.%N)"
+            systemctl --user start ggrun
+            case "$moment" in
+              start) ;;
+              start+0.5s) sleep 0.5 ;;
+              first-listen)
+                for _ in $(seq 900); do
+                  [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 1 "http://127.0.0.1:$port/health" || true)" != 000 ] && break
+                  systemctl --user is-active --quiet ggrun || break; sleep 0.05
+                done ;;
+              first-healthy|healthy+0.2s|healthy+1s|kill-launcher)
+                for _ in $(seq 900); do answering "$port" && break; systemctl --user is-active --quiet ggrun || break; sleep 0.1; done
+                case "$moment" in healthy+0.2s|kill-launcher) sleep 0.2 ;; healthy+1s) sleep 1 ;; esac ;;
+              like-unit-step)
+                # The unit step's own cadence: 2 s polls, then a journal read.
+                for _ in $(seq 180); do answering "$port" && break; systemctl --user is-active --quiet ggrun || break; sleep 2; done
+                journalctl --user -u ggrun --no-pager 2>/dev/null | tail -40 >/dev/null || true ;;
+              server-running)
+                for _ in $(seq 360); do
+                  if journalctl --user -u ggrun -o short-unix --no-pager 2>/dev/null | awk -v s="$since" '$1+0 >= s' \
+                    | grep "Server running on port $port" >/dev/null; then break; fi
+                  systemctl --user is-active --quiet ggrun || break
+                  sleep 0.25
+                done ;;
+            esac
+            healthy=no; answering "$port" && healthy=yes
+            before="$(scope_members)"
+            # The backend's own scope: memory.oom.group, and the wrapper as
+            # systemd-run handed it over (shows any ${...} expansion).
+            llama=""; wrapper=""; watcher=""; oom=-
+            for p in $(scope_pids); do [ "$(cat "/proc/$p/comm" 2>/dev/null)" = llama-server ] && llama=$p; done
+            if [ -n "$llama" ]; then
+              oom="$(cat "/sys/fs/cgroup$(cut -d: -f3 "/proc/$llama/cgroup" 2>/dev/null)/memory.oom.group" 2>/dev/null || echo unreadable)"
+              wrapper="$(awk '/^PPid:/{print $2}' "/proc/$llama/status" 2>/dev/null || true)"
+              [ "$(cat "/proc/$wrapper/comm" 2>/dev/null)" = sh ] || wrapper=""
+            fi
+            if [ -n "$wrapper" ] && [ "$argv_shown" = no ]; then
+              argv_shown=yes
+              echo "--- wrapper argv as received (pid $wrapper), oom.group=$oom"
+              tr '\0' '\n' < "/proc/$wrapper/cmdline" | head -8 || true
+            fi
+            spid=""; trace="$RUNNER_TEMP/strace-$i.txt"
+            if [ -n "$wrapper" ] && { [ "$moment" = first-healthy ] || [ "$moment" = healthy+1s ] || [ "$moment" = kill-launcher ]; }; then
+              for p in $(scope_pids); do
+                [ "$(cat "/proc/$p/comm" 2>/dev/null)" = sh ] && [ "$(awk '/^PPid:/{print $2}' "/proc/$p/status" 2>/dev/null)" = "$wrapper" ] && watcher=$p
+              done
+              # Bounded: strace ends when the traced shells exit, timeout otherwise.
+              sudo timeout 25 strace -f -tt -e trace=signal,kill,tgkill,exit_group -o "$trace" \
+                -p "$wrapper" ${watcher:+-p "$watcher"} 2>/dev/null &
+              spid=$!
+              for _ in $(seq 50); do
+                [ "$(awk '/^TracerPid:/{print $2}' "/proc/$wrapper/status" 2>/dev/null || echo 0)" != 0 ] && break
+                sleep 0.02
+              done
+            fi
+            t_stop="$(date +%s.%N)"
+            # kill-launcher: ggrun dies without running any handler, so only the
+            # scope wrapper (parent-death TERM, watcher) can end the backend.
+            [ "$moment" != kill-launcher ] || systemctl --user kill -s KILL --kill-whom=main ggrun || true
+            systemctl --user stop ggrun || true
+            t_stopped="$(date +%s.%N)"
+            stop_s="$(awk -v a="$t_stop" -v b="$t_stopped" 'BEGIN{printf "%.2f", b-a}')"
+            if systemctl --user is-active --quiet ggrun; then echo "::warning::iteration $i: unit still active after stop"; fi
+            down_after=-; down10=no; down30=no; survivors=-
+            while :; do
+              el="$(awk -v a="$t_stopped" -v b="$(date +%s.%N)" 'BEGIN{printf "%.1f", b-a}')"
+              if ! answering "$port"; then
+                down_after="$el"; down30=yes
+                awk -v e="$el" 'BEGIN{exit !(e <= 10)}' && down10=yes
+                break
+              fi
+              if [ "$down10" = no ] && [ "$survivors" = - ] && awk -v e="$el" 'BEGIN{exit !(e > 10)}'; then
+                survivors="$(scope_members)"
+                echo "iteration $i ($moment): still answering 10s after stop"
+                unit_diag "$port" "$since"
+              fi
+              awk -v e="$el" 'BEGIN{exit !(e > 30)}' && break
+              sleep 0.5
+            done
+            if [ "$down30" = no ]; then
+              echo "iteration $i ($moment): still answering 30s after stop"
+              for p in $(port_pids "$port") $(scope_pids); do proc_line "$p"; done | sort -u || true
+            fi
+            last="$(journalctl --user -u ggrun -o short-unix --no-pager 2>/dev/null \
+              | awk -v s="$since" -v t="$t_stop" '$1+0 >= s && $1+0 < t { sub(/^[^ ]+ [^ ]+ [^ ]+: /, ""); if ($0 ~ /^\[/) l=$0 } END { print l }' \
+              | tr '\t' ' ' | cut -c1-90 || true)"
+            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$i" "$moment" "$port" "$stop_s" "$healthy" "$down10" "$down30" \
+              "$down_after" "$oom" "$before" "$survivors" "${last:-<none>}" >> "$table"
+            if [ -n "$spid" ]; then
+              for _ in $(seq 60); do kill -0 "$spid" 2>/dev/null || break; sleep 0.5; done
+              wait "$spid" 2>/dev/null || true
+              echo "--- iteration $i ($moment): wrapper $wrapper, watcher ${watcher:-?} under strace"
+              grep -E -- '--- SIG|kill\(|tgkill\(|exit_group|\+\+\+' "$trace" 2>/dev/null | grep -v SIGCHLD | cut -c1-200 || true
+              terms="$(grep -cE "^$wrapper +[0-9:.]+ --- SIGTERM" "$trace" 2>/dev/null || true)"
+              reached=no; grep -qE "^$wrapper +[0-9:.]+ kill\(-[0-9]+, SIGKILL" "$trace" 2>/dev/null && reached=yes
+              wexit="$(grep -E "^$wrapper +[0-9:.]+ \+\+\+" "$trace" 2>/dev/null | tail -1 | sed 's/.*+++ \(.*\) +++/\1/' || true)"
+              printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$i" "$moment" "$wrapper" "${terms:-0}" "$reached" "${wexit:-unknown}" >> "$straces"
+            fi
+            cleanup_backends "$port"
+          done
 
       - name: Update the previous Linux release to this candidate
         if: ${{ !(github.event_name == 'release' || github.event_name == 'schedule' || inputs.published == true) }}

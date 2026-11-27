@@ -381,6 +381,7 @@ func cmdFreeToken(args []string) {
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, shutdownSignals()...)
+	server.OwnShutdownSignals()
 	crashed := waitForShutdownOrCrash(process, sigCh)
 	signal.Stop(sigCh)
 	if crashed {
