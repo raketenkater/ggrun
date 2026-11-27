@@ -329,13 +329,21 @@ jobs:
           print_table() {
             echo "=== stop-during-load summary"
             column -t -s "$(printf '\t')" "$table" || cat "$table"
+            echo "=== per moment: tries, still answering at 10 s, at 30 s"
+            awk -F'\t' 'NR>1 { n[$2]++; if ($6=="no") a[$2]++; if ($7=="no") b[$2]++ } END { for (m in n) printf "%-16s %3d %3d %3d\n", m, n[m], a[m]+0, b[m]+0 }' "$table" | sort
             { echo '### Stop during load'; echo '```'; column -t -s "$(printf '\t')" "$table" || cat "$table"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           }
           trap print_table EXIT
           step_start=$SECONDS
           i=0
-          for moment in start start+0.5s first-healthy server-running first-healthy first-healthy; do
-            if [ $((SECONDS - step_start)) -gt 190 ]; then echo "time budget reached; skipping $moment"; continue; fi
+          # Controls first, then cycle the stop moments around readiness until
+          # the time budget is spent: a rare race needs many attempts.
+          controls=(start start+0.5s server-running)
+          cycle=(first-listen first-healthy healthy+0.2s healthy+1s like-unit-step)
+          while :; do
+            if [ "$i" -lt "${#controls[@]}" ]; then moment="${controls[$i]}"
+            else moment="${cycle[$(( (i - ${#controls[@]}) % ${#cycle[@]} ))]}"; fi
+            if [ $((SECONDS - step_start)) -gt 180 ]; then echo "time budget reached after $i iterations"; break; fi
             i=$((i+1)); port=$((18860 + i))
             printf 'GGRUN_MODEL=%s\nGGRUN_ARGS=--cpu --port %s --ctx 2048\n' "$MODEL" "$port" > ~/.config/ggrun/service.env
             systemctl --user reset-failed ggrun 2>/dev/null || true
@@ -344,8 +352,18 @@ jobs:
             case "$moment" in
               start) ;;
               start+0.5s) sleep 0.5 ;;
-              first-healthy)
-                for _ in $(seq 900); do answering "$port" && break; systemctl --user is-active --quiet ggrun || break; sleep 0.1; done ;;
+              first-listen)
+                for _ in $(seq 900); do
+                  [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 1 "http://127.0.0.1:$port/health" || true)" != 000 ] && break
+                  systemctl --user is-active --quiet ggrun || break; sleep 0.05
+                done ;;
+              first-healthy|healthy+0.2s|healthy+1s)
+                for _ in $(seq 900); do answering "$port" && break; systemctl --user is-active --quiet ggrun || break; sleep 0.1; done
+                case "$moment" in healthy+0.2s) sleep 0.2 ;; healthy+1s) sleep 1 ;; esac ;;
+              like-unit-step)
+                # The unit step's own cadence: 2 s polls, then a journal read.
+                for _ in $(seq 180); do answering "$port" && break; systemctl --user is-active --quiet ggrun || break; sleep 2; done
+                journalctl --user -u ggrun --no-pager 2>/dev/null | tail -40 >/dev/null || true ;;
               server-running)
                 for _ in $(seq 360); do
                   if journalctl --user -u ggrun -o short-unix --no-pager 2>/dev/null | awk -v s="$since" '$1+0 >= s' \
