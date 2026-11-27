@@ -14,39 +14,26 @@ import (
 	"time"
 )
 
-// scopedParentWatchScript runs inside the backend's scope. Its teardown must
-// not be interruptible: ggrun's parent-death SIGTERM arrives once per exiting
-// ggrun thread, and a second TERM used to kill this shell after its trap had
-// reset itself, before the backend group was signalled (the backend outlived
-// a stopped ggrun). The script holds no "${": systemd-run expands those.
 const scopedParentWatchScript = `parent=$1
 shift
 cg=$(awk -F: '$1 == "0" { print $3 }' /proc/self/cgroup 2>/dev/null)
-if [ -n "$cg" ] && [ -w "/sys/fs/cgroup$cg/memory.oom.group" ]; then
-  printf '1\n' > "/sys/fs/cgroup$cg/memory.oom.group" 2>/dev/null || true
+if [ -n "$cg" ] && [ -w "/sys/fs/cgroup${cg}/memory.oom.group" ]; then
+  printf '1\n' > "/sys/fs/cgroup${cg}/memory.oom.group" 2>/dev/null || true
 fi
-child=
+setsid "$@" &
+child=$!
 watcher=
 terminate_child() {
-  trap '' HUP INT TERM
-  c=$child
-  [ -n "$c" ] || c=$!
-  if [ -n "$c" ]; then
-    kill -TERM -"$c" 2>/dev/null || true
-  fi
+  trap - HUP INT TERM
   if [ -n "$watcher" ]; then
     kill "$watcher" 2>/dev/null || true
   fi
-  if [ -n "$c" ]; then
-    sleep 2
-    kill -KILL -"$c" 2>/dev/null || true
-  fi
+  kill -TERM -"$child" 2>/dev/null || true
+  sleep 2
+  kill -KILL -"$child" 2>/dev/null || true
 }
 trap 'terminate_child; exit 143' HUP INT TERM
-setsid "$@" &
-child=$!
 (
-  trap '' HUP INT
   while kill -0 "$parent" 2>/dev/null; do
     sleep 1
   done
@@ -57,9 +44,8 @@ child=$!
 watcher=$!
 wait "$child"
 status=$?
-trap '' HUP INT TERM
+trap - HUP INT TERM
 kill "$watcher" 2>/dev/null
-kill -KILL -"$child" 2>/dev/null
 wait "$watcher" 2>/dev/null
 exit "$status"`
 
