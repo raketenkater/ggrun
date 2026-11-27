@@ -46,8 +46,9 @@ import (
 // Normalised: the fixture root becomes $ROOT and the per-run directory $RUN.
 // Nothing else is rewritten.
 //
-// Not reached: dryRunFitRefusal. With these fixtures a dense CPU-offload plan
-// never puts KV on a GPU ledger, with or without backend --fit.
+// dryRunFitRefusal is reached only by the long-context resume cases: the
+// 131072-token models omit key_length/value_length, so their dense CPU-offload
+// plans carry no KV on a GPU ledger, with or without backend --fit.
 //
 // Left out: a "Model does not fit" placement error. placementErrorMessage then
 // scans /proc for running llama-server processes (activeLlamaServerMemoryHint),
@@ -205,6 +206,11 @@ func dryRunConsoleCases() []dryRunConsoleCase {
 		// A session this machine has no record of: the plan is the first plan
 		// and the dry run says the size could not be read.
 		{name: "claude-resume/session-missing/gpu12", args: on(dryRunConsoleLongCtx, "gpu12", "--claude-resume", dryRunConsoleMissingSessionID)},
+		// The two plans the resume re-plan asks for, asked directly with no
+		// session: four slots of 1,036,288 (its first try), then the one slot
+		// it falls back to.
+		{name: "claude-resume/long-ctx/gpu12/direct-ctx-4-slots", args: on(dryRunConsoleLongCtx, "gpu12", "--claude-code", "--ctx", "4145152", "--parallel", "4")},
+		{name: "claude-resume/long-ctx/gpu12/direct-ctx-1-slot", args: on(dryRunConsoleLongCtx, "gpu12", "--claude-code", "--ctx", "1036288", "--parallel", "1")},
 		// The same session on a host with 16 GB of free RAM: no plan holds its
 		// KV, and the dry run prints the launch's warning.
 		{name: "claude-resume/long-ctx/gpu12-ram16", args: on(dryRunConsoleLongCtx, "gpu12-ram16", "--claude-resume", dryRunConsoleSessionID), sessionTokens: 1000000},
