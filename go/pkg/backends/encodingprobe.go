@@ -47,8 +47,15 @@ import (
 // full once, and when a limit cuts it short Complete is false.
 //
 // What a hit means: the backend's type table has the name; it does not prove
-// the GPU backends have kernels for it, and a help hit may only be the
-// KV-cache type list.
+// the GPU backends have kernels for it.
+//
+// Help text is not evidence. Real --help output names KV-cache types ("allowed
+// values: f32, f16, bf16, q8_0, q4_0, q4_1, iq4_nl, q5_0, q5_1" under
+// --cache-type-k/-v) and other options; those words describe how the KV cache
+// is stored, not which tensor encodings a model file may use, and several
+// forks and builds print different lists. Weight encodings such as q4_K or
+// iq4_xs never appear in it. So help never makes a name Found or Absent: the
+// names that occur in it as whole words are only listed in EncodingProbe.HelpHints.
 
 const (
 	encodingScanChunk    = 4 << 20
@@ -69,38 +76,56 @@ var (
 	tableAnchorB = []byte("\x00q8_0\x00q8_1\x00")
 )
 
-// EncodingProbe is what a backend build is known to carry.
+// EncodingProbe is what a backend build is known to carry. Ask it about a name
+// with Absent; the maps hold only what was found.
 type EncodingProbe struct {
-	// Found maps each requested name (as the caller spelled it) that is in the
-	// build's type table to its source: "help", or the base name of the file
-	// holding the table (a symlink resolved).
+	// Found maps each requested name (as the caller spelled it) that is a string
+	// of the build's type table to the base name of the file holding the table
+	// (a symlink resolved).
 	Found map[string]string
 	// Undetermined maps each requested name that is no string of the type table
 	// but may still be a type of the backend to the evidence: the longer table
 	// string it ends (name -> "bf16"), or "outside the type table" when the name
 	// occurs elsewhere in the file as a NUL-terminated string. It is neither
-	// found nor absent: use Absent, never "not in Found", to ask whether a name
-	// is missing.
+	// found nor absent.
 	Undetermined map[string]string
+	// HelpHints lists the requested names that occur as whole words in the help
+	// text, sorted. A hint only: help describes KV-cache types, not tensor
+	// encodings (see the file header), so it changes neither Found nor Absent.
+	HelpHints []string
 	// TableSeen is true when a file with a recognisable type table was read.
 	TableSeen bool
-	// Complete is true when every requested name was found, or the file holding
-	// the type table was read in full: TableSeen and not cut short by a read
-	// bound. Only then does a name that is in neither Found nor
-	// Undetermined mean the backend lacks it. When false nothing is known about
-	// the names not in Found: no build was given, no file held the table, a file
-	// was unreadable or over the read bounds, or the libraries holding the table
+	// Complete is true only when the file holding the type table was read to
+	// its end: TableSeen and not cut short by a read bound or an error. It is
+	// false when no build was given, no file held the table, a file was
+	// unreadable or over the read bounds, or the libraries holding the table
 	// were not located (a system install without RUNPATH, or a platform whose
-	// libraries are not looked up beyond the binary's own directory).
+	// libraries are not looked up beyond the binary's own directory). Nothing
+	// but the table makes it true.
 	Complete bool
+
+	requested map[string]bool // lower-case names the probe was asked about
 }
 
-// Absent reports that the build is known to lack name: the table was read and
-// it is neither found nor undetermined.
+// Absent reports that the build is known to lack name: name was among the names
+// asked about, the type table was read in full (Complete), and the name is
+// neither found nor undetermined (compared ignoring case). It is false for a
+// name that was not asked about, and false whenever the table was not read.
 func (p EncodingProbe) Absent(name string) bool {
-	_, found := p.Found[name]
-	_, undetermined := p.Undetermined[name]
-	return p.Complete && !found && !undetermined
+	if !p.Complete || !p.TableSeen || !p.requested[strings.ToLower(name)] {
+		return false
+	}
+	for n := range p.Found {
+		if strings.EqualFold(n, name) {
+			return false
+		}
+	}
+	for n := range p.Undetermined {
+		if strings.EqualFold(n, name) {
+			return false
+		}
+	}
+	return true
 }
 
 // EncodingsInHelp returns the names that occur as whole words in help,
@@ -503,23 +528,14 @@ func ProbeBackendEncodings(binaryPath, help string, names []string) EncodingProb
 // probeBackendEncodings is ProbeBackendEncodings with its read bounds as
 // parameters, so tests can use small ones.
 func probeBackendEncodings(binaryPath, help string, names []string, maxFileBytes, maxTotal int64, maxFiles int) EncodingProbe {
-	probe := EncodingProbe{Found: map[string]string{}, Undetermined: map[string]string{}}
+	probe := EncodingProbe{Found: map[string]string{}, Undetermined: map[string]string{}, requested: map[string]bool{}}
 	names = uniqueEncodingNames(names)
-	if len(names) == 0 {
-		probe.Complete = true
-		return probe
-	}
-	for _, n := range EncodingsInHelp(help, names) {
-		probe.Found[n] = "help"
-	}
-	var remaining []string
 	for _, n := range names {
-		if _, ok := probe.Found[n]; !ok {
-			remaining = append(remaining, n)
-		}
+		probe.requested[strings.ToLower(n)] = true
 	}
-	if len(remaining) == 0 {
-		probe.Complete = true
+	probe.HelpHints = EncodingsInHelp(help, names)
+	remaining := names
+	if len(names) == 0 {
 		return probe
 	}
 	if binaryPath == "" {
