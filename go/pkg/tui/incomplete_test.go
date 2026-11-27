@@ -161,3 +161,65 @@ func TestKeyPressRechecksFinishedDownload(t *testing.T) {
 		t.Fatalf("list row still marked: %#v", item)
 	}
 }
+
+// A header-only file that declares 4 GiB of F32 data: the note must carry the
+// real sizes, not "0.0 of 0.0 GB".
+func TestIncompleteNoteShowsRealGigabytes(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "big.gguf")
+	writeF32GGUF(t, path, 1<<30, 0)
+	got := incompleteDownloadNote(gguf.OpenHeaderCache(""), path)
+	if got != "incomplete download: 0.0 of 4.0 GB" {
+		t.Fatalf("note = %q", got)
+	}
+}
+
+func incompleteMainModel(t *testing.T) Model {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "short.gguf")
+	writeF32GGUF(t, path, 1<<30, 10)
+	cacheDir := t.TempDir()
+	models := enrichModelItems([]ModelItem{{Name: "short.gguf", Path: path, Arch: "dense"}}, cacheDir, "auto", nil)
+	if len(models) != 1 || models[0].Incomplete == "" {
+		t.Fatalf("model not marked: %#v", models)
+	}
+	m := Model{screen: ScreenMain, cacheDir: cacheDir, models: models, mainList: newMainList(models)}
+	m.input = textinput.New()
+	m.mainList.Select(3)
+	return m
+}
+
+func requireIncompleteRefusal(t *testing.T, got Model) {
+	t.Helper()
+	if got.screen != ScreenMain || got.launchRequest != nil || got.messageType != "error" {
+		t.Fatalf("incomplete model was not refused: screen %v, type %q, msg %q", got.screen, got.messageType, got.message)
+	}
+	if !strings.Contains(got.message, "incomplete download: 0.0 of 4.0 GB") || !strings.Contains(got.message, "ggrun launch <path>") {
+		t.Fatalf("refusal = %q", got.message)
+	}
+}
+
+func TestConfigureKeyRefusesIncompleteModel(t *testing.T) {
+	m := incompleteMainModel(t)
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	requireIncompleteRefusal(t, next.(Model))
+}
+
+func TestLatestLaunchRefusesIncompleteModel(t *testing.T) {
+	m := incompleteMainModel(t)
+	if err := SaveLatestLaunch(m.cacheDir, &LaunchRequest{ModelPath: m.models[0].Path}); err != nil {
+		t.Fatal(err)
+	}
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
+	got := next.(Model)
+	requireIncompleteRefusal(t, got)
+	if got.replayRequest != nil {
+		t.Fatalf("refused replay left a request behind: %#v", got.replayRequest)
+	}
+}
+
+func TestBackendInstallReopenRefusesIncompleteModel(t *testing.T) {
+	modelPath := isolatedModelDir(t)
+	writeF32GGUF(t, modelPath, 1<<30, 10)
+	m := afterBackendInstallModel(&LaunchRequest{ModelPath: modelPath, Backend: "some-recipe"})
+	requireIncompleteRefusal(t, m)
+}
