@@ -7506,8 +7506,7 @@ func cmdLaunch(args []string) {
 				if path, saveErr := placement.SaveCalibrationDecision(cfg.CacheDir, *pendingCalibration); saveErr != nil {
 					fmt.Fprintf(os.Stderr, "[optimize] bounded baseline cache failed: %v\n", saveErr)
 				} else {
-					fmt.Printf("[optimize] baseline kept for %s (%s); the profile serves but could not prove cache reuse, so identical launches skip this search (%s)\n",
-						pendingCalibration.Finalist, pendingCalibration.FinalistOutcome, path)
+					fmt.Println(boundedBaselineKeptLine(pendingCalibration, path))
 				}
 			} else {
 				fmt.Fprintf(os.Stderr, "[calibrate] screened winner did not reach an active profile; decision not cached\n")

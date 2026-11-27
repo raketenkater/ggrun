@@ -2,9 +2,8 @@ package main
 
 // Pins for "the calibration cost is paid once": what a saved decision and a
 // verified config suppress on the next identical launch, and where today's
-// policy pays the search again. Tests only; no product behaviour is changed.
-// A test named ..._KnownDefect asserts today's behaviour and says what must
-// flip when the defect is fixed.
+// policy pays the search again. A test named ..._KnownCost asserts today's
+// behaviour and says what must flip if that cost is removed.
 
 import (
 	"fmt"
@@ -50,8 +49,9 @@ func reusePinFixture(t *testing.T) (*launchRequest, *config.Config, *placement.M
 // reusePinMeasuredDecision builds the decision runCalibration returns when the
 // baseline beat the finalist it actually loaded (measured[1], after any
 // telemetry- or phase-directed swap): scopedCalibrationDecision for the
-// default, then annotateOptimizationDecision over the measured order.
-func reusePinMeasuredDecision(t *testing.T, scope placement.CalibrationScopeKey, model *placement.ModelProfile, measured []placement.CalibrationCandidate) *placement.CalibrationDecision {
+// default, annotateOptimizationDecision over the measured order, then
+// recordCalculatedFinalist with the plan's calculated finalist.
+func reusePinMeasuredDecision(t *testing.T, scope placement.CalibrationScopeKey, model *placement.ModelProfile, calculated placement.CalibrationCandidate, measured []placement.CalibrationCandidate) *placement.CalibrationDecision {
 	t.Helper()
 	if len(measured) < 2 {
 		t.Fatalf("need a baseline and a finalist, got %d candidates", len(measured))
@@ -66,6 +66,7 @@ func reusePinMeasuredDecision(t *testing.T, scope placement.CalibrationScopeKey,
 		t.Fatal("no decision for a complete baseline result")
 	}
 	annotateOptimizationDecision(decision, measured, measurements)
+	recordCalculatedFinalist(decision, calculated.Name, placement.CalibrationStrategyFingerprint(calculated.Strategy), measured[1].Name)
 	if decision.Winner != "default" || decision.Finalist != measured[1].Name || decision.FinalistOutcome != "baseline-won" {
 		t.Fatalf("decision does not record the measured finalist: winner=%q finalist=%q outcome=%q",
 			decision.Winner, decision.Finalist, decision.FinalistOutcome)
@@ -76,9 +77,9 @@ func reusePinMeasuredDecision(t *testing.T, scope placement.CalibrationScopeKey,
 // reusePinDegradedDecision is the save in the launch's degraded-profile block
 // (main.go, "baseline kept for ... identical launches skip this search"):
 // degradedBaselinePersistable, then ValidationLevel baseline-bounded.
-func reusePinDegradedDecision(t *testing.T, scope placement.CalibrationScopeKey, model *placement.ModelProfile, measured []placement.CalibrationCandidate) placement.CalibrationDecision {
+func reusePinDegradedDecision(t *testing.T, scope placement.CalibrationScopeKey, model *placement.ModelProfile, calculated placement.CalibrationCandidate, measured []placement.CalibrationCandidate) placement.CalibrationDecision {
 	t.Helper()
-	decision := reusePinMeasuredDecision(t, scope, model, measured)
+	decision := reusePinMeasuredDecision(t, scope, model, calculated, measured)
 	if !degradedBaselinePersistable(calibrateAuto, decision, true) {
 		t.Fatalf("a functional degraded profile would not keep this baseline-won decision: %+v", decision)
 	}
@@ -99,10 +100,10 @@ func reusePinNames(candidates []placement.CalibrationCandidate) []string {
 // finalist ... with phase-directed ..."). On the same frontier the two
 // selectors pick different finalists in an ordinary case: a scheduler-limited
 // mixed phase points at the smallest batch/ubatch, the cost ranking at the
-// cheapest estimate. The decision then names the directed finalist, and it
-// suppresses a retry only for that name, never for the calculated one that
-// the next launch's calibrationPlan compares against.
-func TestPhaseDirectedFinalistIsNotTheCalculatedFinalist_KnownDefect(t *testing.T) {
+// cheapest estimate. The decision names the directed finalist it measured and
+// records the calculated one, so it covers the next plan with that calculated
+// finalist and no other.
+func TestPhaseDirectedFinalistDecisionCoversTheCalculatedPlan(t *testing.T) {
 	roomy := func(batch, ubatch int) *placement.Strategy {
 		return &placement.Strategy{
 			Type: placement.MoEOffload, Residency: placement.ResidencyRoomy,
@@ -127,30 +128,47 @@ func TestPhaseDirectedFinalistIsNotTheCalculatedFinalist_KnownDefect(t *testing.
 		t.Fatalf("phase-directed finalist = %q (ok=%v), want batch-64-ubatch-64", directed.Name, ok)
 	}
 	measured := prioritizeCalibrationFinalist(calculated, directed)
-	decision := reusePinDegradedDecision(t, placement.CalibrationScopeKey{ModelIdentity: "m"}, &placement.ModelProfile{Path: "m.gguf"}, measured)
-	if decision.Finalist != directed.Name {
-		t.Errorf("saved finalist = %q, want the measured directed %q", decision.Finalist, directed.Name)
+	decision := reusePinDegradedDecision(t, placement.CalibrationScopeKey{ModelIdentity: "m"}, &placement.ModelProfile{Path: "m.gguf"}, calculated[1], measured)
+	if decision.Finalist != directed.Name || decision.CalculatedFinalist != calculated[1].Name {
+		t.Errorf("saved finalist = %q calculated = %q, want measured %q and calculated %q",
+			decision.Finalist, decision.CalculatedFinalist, directed.Name, calculated[1].Name)
 	}
 	if !decision.SuppressesAutomaticAdmissionRetry(directed.Name) {
 		t.Error("the decision does not even suppress the finalist it measured")
 	}
-	// KNOWN DEFECT: calibrationPlan asks about the calculated finalist. When
-	// fixed, an identical scope must not be re-searched after this decision
-	// (this assertion flips, or the plan stops comparing by finalist name).
-	if decision.SuppressesAutomaticAdmissionRetry(calculated[1].Name) {
-		t.Error("defect appears fixed: the decision now suppresses the calculated finalist; update this pin")
+	fingerprint := placement.CalibrationStrategyFingerprint
+	if !decision.SuppressesAutomaticSearch(calculated[1].Name, fingerprint(calculated[1].Strategy)) {
+		t.Error("the decision does not cover the plan it searched")
+	}
+	if decision.SuppressesAutomaticSearch(directed.Name, fingerprint(directed.Strategy)) {
+		t.Error("the decision covers a plan whose calculated finalist is the directed one")
+	}
+	// Same name, different strategy: a recomputed candidate (expert-pack and
+	// the like) is a different experiment and is searched again.
+	if decision.SuppressesAutomaticSearch(calculated[1].Name, fingerprint(roomy(512, 512))) {
+		t.Error("the decision covers a calculated finalist of the same name but another strategy")
+	}
+	if decision.SuppressesAutomaticSearch(calculated[1].Name, "") {
+		t.Error("the decision covers a calculated finalist without a strategy")
+	}
+	// A record written before the field existed keeps the older comparison.
+	legacy := decision
+	legacy.CalculatedFinalist = ""
+	legacy.CalculatedFingerprint = ""
+	if legacy.SuppressesAutomaticSearch(calculated[1].Name, fingerprint(calculated[1].Strategy)) ||
+		!legacy.SuppressesAutomaticSearch(directed.Name, fingerprint(directed.Strategy)) {
+		t.Error("a record without calculated_finalist no longer compares against its finalist")
 	}
 }
 
 // End to end at the policy level: the degraded-profile launch saves a
 // baseline-bounded decision naming the finalist it measured; the next
 // identical launch calls calibrationPlan for the same request, model, hardware
-// and baseline (same scope key). If the measured finalist was the calculated
-// one, the search is suppressed (control). If it was any other candidate, as
-// after the phase-directed swap above, the full search is planned again: a
-// challenger load and a baseline restore on every launch, although the launch
-// printed that identical launches skip it.
-func TestCalibrationPlan_DegradedProfileRepeatsSearch_KnownDefect(t *testing.T) {
+// and baseline (same scope key) and plans nothing, whether the measured
+// finalist was the calculated one or a directed replacement. A record without
+// calculated_finalist behaves as before; a decision recorded for another
+// calculated finalist or another scope never suppresses the search.
+func TestCalibrationPlan_DegradedProfileSkipsIdenticalSearch(t *testing.T) {
 	req, cfg, model, be, caps, strategy := reusePinFixture(t)
 	first := calibrationPlan(req, cfg, model, be, caps, strategy)
 	if len(first) < 2 {
@@ -170,6 +188,7 @@ func TestCalibrationPlan_DegradedProfileRepeatsSearch_KnownDefect(t *testing.T) 
 	}
 	t.Logf("calculated finalist %s, measured stand-in %s, frontier %v", calculated, directed.Name, reusePinNames(frontier))
 	scope := calibrationScope(req, model, be, caps, strategy)
+	redirected := prioritizeCalibrationFinalist(first, directed)
 
 	save := func(d placement.CalibrationDecision) {
 		t.Helper()
@@ -177,25 +196,63 @@ func TestCalibrationPlan_DegradedProfileRepeatsSearch_KnownDefect(t *testing.T) 
 			t.Fatal(err)
 		}
 	}
+	searches := func(label string) {
+		t.Helper()
+		got := calibrationPlan(req, cfg, model, be, caps, strategy)
+		if len(got) < 2 {
+			t.Errorf("%s: the search was suppressed: %v", label, reusePinNames(got))
+		} else if got[1].Name != calculated {
+			t.Errorf("%s: plan finalist = %q, want the calculated %q", label, got[1].Name, calculated)
+		}
+	}
 
 	// Control: the measured finalist is the calculated one.
-	save(reusePinDegradedDecision(t, scope, model, first))
+	save(reusePinDegradedDecision(t, scope, model, first[1], first))
 	if got := calibrationPlan(req, cfg, model, be, caps, strategy); len(got) != 0 {
 		t.Errorf("control: a bounded decision for the calculated finalist did not suppress the search: %v", reusePinNames(got))
 	}
 
 	// The measured finalist differs from the calculated one.
-	save(reusePinDegradedDecision(t, scope, model, prioritizeCalibrationFinalist(first, directed)))
-	if loaded, err := placement.LoadCalibrationDecision(cfg.CacheDir, scope.String()); err != nil || loaded.Finalist != directed.Name {
+	bounded := reusePinDegradedDecision(t, scope, model, first[1], redirected)
+	save(bounded)
+	if loaded, err := placement.LoadCalibrationDecision(cfg.CacheDir, scope.String()); err != nil ||
+		loaded.Finalist != directed.Name || loaded.CalculatedFinalist != calculated {
 		t.Fatalf("the bounded decision is not the one loaded for this scope: %+v err=%v", loaded, err)
 	}
-	got := calibrationPlan(req, cfg, model, be, caps, strategy)
-	// KNOWN DEFECT: when fixed, this identical launch plans nothing (len 0).
-	if len(got) < 2 {
-		t.Errorf("defect appears fixed: the identical launch no longer re-searches (%v); update this pin", reusePinNames(got))
-	} else if got[1].Name != calculated {
-		t.Errorf("repeated plan finalist = %q, want the calculated %q", got[1].Name, calculated)
+	if got := calibrationPlan(req, cfg, model, be, caps, strategy); len(got) != 0 {
+		t.Errorf("the identical launch re-searched after a directed finalist was measured: %v", reusePinNames(got))
 	}
+
+	// The same decision for another scope does not suppress that scope's
+	// search. Only the backend identity changes, so the frontier is the same.
+	other := *be
+	other.Identity = be.Identity + "-rebuilt"
+	if otherScope := calibrationScope(req, model, &other, caps, strategy); otherScope.String() == scope.String() {
+		t.Fatal("a different backend identity did not change the scope key")
+	}
+	if got := calibrationPlan(req, cfg, model, &other, caps, strategy); len(got) < 2 {
+		t.Errorf("a decision for scope X suppressed scope Y: %v", reusePinNames(got))
+	}
+
+	// A record written without calculated_finalist (main before this field)
+	// keeps the older comparison: a directed finalist does not cover the plan.
+	legacy := bounded
+	legacy.CalculatedFinalist, legacy.CalculatedFingerprint = "", ""
+	save(legacy)
+	searches("record without calculated_finalist")
+
+	// Same calculated name, another strategy (a recomputed expert-pack, for
+	// example): a different experiment, so it is searched.
+	shifted := bounded
+	shifted.CalculatedFingerprint = placement.CalibrationStrategyFingerprint(directed.Strategy)
+	save(shifted)
+	searches("same calculated name, another strategy")
+
+	// A decision recorded for a different calculated finalist (a changed
+	// candidate set) still searches, even though its measured finalist is the
+	// current calculated one: the two comparisons are never combined.
+	save(reusePinDegradedDecision(t, scope, model, directed, first))
+	searches("decision for another calculated finalist")
 }
 
 // A release that bumps CalibrationSchemaVersion retires every saved decision:
@@ -210,7 +267,7 @@ func TestCalibrationPlan_OlderSchemaDecisionRepeatsSearch_KnownCost(t *testing.T
 		t.Fatalf("fixture produced no automatic finalist: %v", reusePinNames(first))
 	}
 	scope := calibrationScope(req, model, be, caps, strategy)
-	decision := reusePinMeasuredDecision(t, scope, model, first)
+	decision := reusePinMeasuredDecision(t, scope, model, first[1], first)
 	if !automaticCalibrationEvidenceValid(decision) {
 		t.Fatalf("complete comparison was rejected: %+v", decision)
 	}
@@ -368,7 +425,7 @@ func TestCalibrationPaidOnce_CalibratedLaunchThenIdenticalRelaunchStartsDirect(t
 		t.Errorf("precondition: the first launch schedules no search (%v), so nothing is paid; %s",
 			reusePinNames(plan), reusePinPlanShape(req, cfg, model, be, caps, first))
 	} else {
-		decision := reusePinMeasuredDecision(t, calibrationScope(req, model, be, caps, first), model, plan)
+		decision := reusePinMeasuredDecision(t, calibrationScope(req, model, be, caps, first), model, plan[1], plan)
 		if !automaticCalibrationEvidenceValid(decision) {
 			t.Fatalf("complete comparison was rejected: %+v", decision)
 		}
@@ -407,7 +464,7 @@ func TestCalibrationPlan_SchemaBumpWithVerifiedConfigStartsDirect(t *testing.T) 
 	first := reusePinCompute(t, req, cfg, model, be, caps)
 	plan := calibrationPlan(req, cfg, model, be, caps, first)
 	if len(plan) >= 2 {
-		decision := reusePinMeasuredDecision(t, calibrationScope(req, model, be, caps, first), model, plan)
+		decision := reusePinMeasuredDecision(t, calibrationScope(req, model, be, caps, first), model, plan[1], plan)
 		decision.ValidationLevel = placement.CalibrationValidationWorkflow
 		decision.SchemaVersion = placement.CalibrationSchemaVersion - 2
 		if _, err := placement.SaveCalibrationDecision(cfg.CacheDir, *decision); err != nil {
