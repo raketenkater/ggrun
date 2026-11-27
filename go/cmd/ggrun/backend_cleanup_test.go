@@ -278,7 +278,7 @@ func TestBackendCleanupRefusesWhenManifestIsCorrupt(t *testing.T) {
 		t.Fatal(err)
 	}
 	c, _ := tio(false, "")
-	if err := runBackendGC([]string{"--yes"}, c, f.env); err == nil || !strings.Contains(err.Error(), "manifest unreadable") {
+	if err := runBackendGC([]string{"--yes"}, c, f.env); err == nil || !strings.Contains(err.Error(), "manifest unavailable") {
 		t.Fatalf("gc --yes on a corrupt manifest: %v", err)
 	}
 	if err := runBackendRemove([]string{"a", "--purge", "--yes"}, c, f.env, backends.Remove); err == nil {

@@ -345,6 +345,8 @@ func TestPurgeDeletesExactlyTheTree(t *testing.T) {
 		{Tag: "b", Path: filepath.Join(h.Home, ".src", "fork-b", "build-cuda", "bin", "llama-server")},
 	}
 	env := h.env(list, []ProcInfo{{PID: 1, Exe: filepath.Join(h.Home, ".src", "fork-b", "build-cuda", "bin", "llama-server")}})
+	// The inner symlink's own mtime cannot be backdated portably: look from later.
+	env.Now = time.Now().Add(72 * time.Hour)
 	plan, err := PlanPurge(env, "a")
 	if err != nil {
 		t.Fatalf("a process in another tree must not block: %v", err)
