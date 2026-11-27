@@ -71,11 +71,13 @@ func parseCleanupArgs(args []string, wantTag bool) (cleanupOpts, error) {
 }
 
 func defaultCleanupEnv(o cleanupOpts) backends.CleanupEnv {
+	list, err := backends.LoadStrict()
 	return backends.CleanupEnv{
 		AppHome:         backends.AppHome(),
-		Backends:        backends.Load(),
+		Backends:        list,
 		Processes:       backends.PlatformProcessLister(),
 		ForceNotRunning: o.ForceNotRunning,
+		ManifestErr:     err,
 	}
 }
 

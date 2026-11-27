@@ -60,9 +60,14 @@ type CleanupEnv struct {
 	// Processes lists running processes. Nil means this platform has no
 	// implementation; deleting then needs ForceNotRunning.
 	Processes func() ([]ProcInfo, error)
-	// ForceNotRunning skips the process check (--force-not-running).
+	// ForceNotRunning (--force-not-running) lets deletion proceed when the
+	// process table is unavailable. It never overrides a process that is seen.
 	ForceNotRunning bool
-	Now             time.Time
+	// ManifestErr is set when backends.json exists but could not be read. Cleanup
+	// then plans nothing: an unreadable manifest would make every registered
+	// tree look unreferenced.
+	ManifestErr error
+	Now         time.Time
 	// QuietWindow overrides defaultQuietWindow for gc.
 	QuietWindow time.Duration
 }
@@ -303,17 +308,22 @@ func treeKey(m map[string][]string, tree string) []string {
 }
 
 // runningFrom lists processes whose program file or working directory is inside
-// dir. It fails closed: no process table and no ForceNotRunning means refusal.
+// dir. It fails closed: when the process table cannot be read, deleting needs
+// ForceNotRunning. That flag only stands in for a missing or failing table; a
+// process the table does show in the tree always blocks.
 func (env CleanupEnv) runningFrom(dir string) ([]ProcInfo, error) {
-	if env.ForceNotRunning {
-		return nil, nil
-	}
+	var procs []ProcInfo
+	var err error
 	if env.Processes == nil {
-		return nil, fmt.Errorf("%w on %s; pass --force-not-running once you have checked yourself", ErrNoProcessCheck, runtime.GOOS)
+		err = fmt.Errorf("%w on %s; pass --force-not-running once you have checked yourself", ErrNoProcessCheck, runtime.GOOS)
+	} else if procs, err = env.Processes(); err != nil {
+		err = fmt.Errorf("%w (%v); pass --force-not-running once you have checked yourself", ErrNoProcessCheck, err)
 	}
-	procs, err := env.Processes()
 	if err != nil {
-		return nil, fmt.Errorf("%w (%v); pass --force-not-running once you have checked yourself", ErrNoProcessCheck, err)
+		if env.ForceNotRunning {
+			return nil, nil
+		}
+		return nil, err
 	}
 	var hit []ProcInfo
 	for _, p := range procs {
@@ -372,6 +382,9 @@ func (env CleanupEnv) checkPlan(p TreePlan) error {
 // PlanPurge plans removing one backend's source tree (the build directories are
 // inside it). It returns a refusal as an error and deletes nothing.
 func PlanPurge(env CleanupEnv, tag string) (TreePlan, error) {
+	if env.ManifestErr != nil {
+		return TreePlan{}, fmt.Errorf("backend manifest unreadable: %w", env.ManifestErr)
+	}
 	var be *Backend
 	for i := range env.Backends {
 		if strings.EqualFold(env.Backends[i].Tag, tag) {
@@ -431,6 +444,9 @@ func isStaleBuildName(name string) bool {
 // updates that no registration (including its retained previous build) uses.
 // Entries that cannot be deleted right now carry Blocked.
 func PlanGC(env CleanupEnv) ([]TreePlan, error) {
+	if env.ManifestErr != nil {
+		return nil, fmt.Errorf("backend manifest unreadable, so nothing can be called unreferenced: %w", env.ManifestErr)
+	}
 	srcRoot := SourceRoot(env.AppHome)
 	entries, err := os.ReadDir(srcRoot)
 	if err != nil {

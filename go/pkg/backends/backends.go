@@ -410,6 +410,23 @@ func Load() []Backend {
 	return list
 }
 
+// LoadStrict is Load for callers that must tell "no backends" from "cannot
+// read the manifest": a missing file is an empty list, any other failure is an
+// error.
+func LoadStrict() ([]Backend, error) {
+	list, err := loadManifest(ManifestPath())
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	for i := range list {
+		list[i] = ApplyBuiltinPolicy(list[i])
+	}
+	return list, nil
+}
+
 // ApplyBuiltinPolicy makes safety attributes in the reviewed catalog
 // authoritative over legacy manifests. Older backends.json files predate
 // helper_only; interpreting an omitted false literally would route a

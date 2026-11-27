@@ -184,6 +184,22 @@ func TestPlanPurgeRefusals(t *testing.T) {
 			tag: "cwd", want: ErrRunning,
 		},
 		{
+			name: "force flag never overrides a process that is seen",
+			setup: func(h *cleanupHome) ([]Backend, []ProcInfo, func(*CleanupEnv)) {
+				bin := h.fork("fork-forced-run")
+				return []Backend{{Tag: "fr", Path: bin}}, []ProcInfo{{PID: 11, Exe: bin}}, func(e *CleanupEnv) { e.ForceNotRunning = true }
+			},
+			tag: "fr", want: ErrRunning, keep: []string{".src/fork-forced-run/src/main.cpp"},
+		},
+		{
+			name: "manifest unreadable",
+			setup: func(h *cleanupHome) ([]Backend, []ProcInfo, func(*CleanupEnv)) {
+				bin := h.fork("fork-manifest")
+				return []Backend{{Tag: "m", Path: bin}}, nil, func(e *CleanupEnv) { e.ManifestErr = errors.New("decode backend manifest: invalid character") }
+			},
+			tag: "m", keep: []string{".src/fork-manifest/src/main.cpp"},
+		},
+		{
 			name: "no process check on this platform",
 			setup: func(h *cleanupHome) ([]Backend, []ProcInfo, func(*CleanupEnv)) {
 				bin := h.fork("fork-nocheck")
@@ -487,6 +503,16 @@ func TestPlanGCWithoutProcessCheckBlocksEverything(t *testing.T) {
 	plans, _ = PlanGC(env)
 	if plans[0].Blocked != "" {
 		t.Fatalf("forced run still blocked: %q", plans[0].Blocked)
+	}
+}
+
+func TestPlanGCRefusesWithUnreadableManifest(t *testing.T) {
+	h := newCleanupHome(t)
+	h.fork("fork-registered-but-manifest-unreadable")
+	env := h.env(nil, nil)
+	env.ManifestErr = errors.New("decode backend manifest: invalid character")
+	if plans, err := PlanGC(env); err == nil || len(plans) != 0 {
+		t.Fatalf("gc must plan nothing: %v %v", plans, err)
 	}
 }
 

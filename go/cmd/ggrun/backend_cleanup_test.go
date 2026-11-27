@@ -254,6 +254,35 @@ func TestBackendGCListsByDefaultAndDeletesWithConsent(t *testing.T) {
 	}
 }
 
+func TestBackendCleanupRefusesWhenManifestIsCorrupt(t *testing.T) {
+	f := newCleanupFixture(t)
+	if err := os.WriteFile(backends.ManifestPath(), []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c, _ := tio(false, "")
+	if err := runBackendGC([]string{"--yes"}, c, f.env); err == nil || !strings.Contains(err.Error(), "manifest unreadable") {
+		t.Fatalf("gc --yes on a corrupt manifest: %v", err)
+	}
+	if err := runBackendRemove([]string{"a", "--purge", "--yes"}, c, f.env, backends.Remove); err == nil {
+		t.Fatal("purge on a corrupt manifest must refuse")
+	}
+	for _, rel := range []string{".src/fork-a/src/main.cpp", ".src/fork-b/src/main.cpp", ".src/fork-orphan/src/main.cpp"} {
+		if !f.exists(rel) {
+			t.Fatalf("%s was deleted", rel)
+		}
+	}
+}
+
+func TestBackendCleanupTreatsMissingManifestAsEmpty(t *testing.T) {
+	f := newCleanupFixture(t)
+	if err := os.Remove(backends.ManifestPath()); err != nil {
+		t.Fatal(err)
+	}
+	if env := f.env(cleanupOpts{}); env.ManifestErr != nil || len(env.Backends) != 0 {
+		t.Fatalf("%+v", env)
+	}
+}
+
 func mustIO(terminal bool) cleanupIO {
 	c, _ := tio(terminal, "")
 	return c

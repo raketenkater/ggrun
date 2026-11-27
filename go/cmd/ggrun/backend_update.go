@@ -404,6 +404,7 @@ func rollbackRegisteredBackend(tag string) (backends.Backend, error) {
 	restored.Commit = be.Previous.Commit
 	restored.AppliedPatches = be.Previous.AppliedPatches
 	restored.Previous = current
+	restored.Build = nil // the record described the build just rolled away
 	if err := backends.Upsert(restored); err != nil {
 		revert()
 		return backends.Backend{}, fmt.Errorf("register rollback failed; active build put back: %w", err)
