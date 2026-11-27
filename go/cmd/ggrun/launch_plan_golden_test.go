@@ -51,8 +51,9 @@ import (
 //     selection (applyBackendFeatureCompatibility, preflightBackendArch) runs.
 //
 // Excluded because they need a live probe, network or nvidia-smi: backend
-// discovery, GGUF parsing, live VRAM readings (the fit guard's driver free
-// VRAM and live usage are stubbed from the inventory), the Vulkan device
+// discovery, GGUF parsing, live VRAM readings (an inventory plan derives the
+// fit guard's driver free VRAM, live usage and resident reviewer from the
+// inventory; this host's readers fail the test), the Vulkan device
 // listing (the fixtures are CUDA backends; a call fails the test), draft-model discovery (speculation
 // stays off) and the "Model does not fit" process hint of placementErrorMessage
 // (the raw error is recorded). The console golden
@@ -450,7 +451,7 @@ func goldenPlanDryRun(t *testing.T, c goldenPlanCase) goldenPlanRecord {
 }
 
 // goldenPlanInputs are planLaunch's inputs for a replay. Hardware is the
-// case's --inventory (Detect is not run: it would probe this host), the model
+// case's --inventory (Detect must not run: it would probe this host), the model
 // is the synthetic profile in place of parseModel, and the backend is the
 // fixture in place of selectBackendForModel; what resolveLaunchBackend does
 // after selection runs (normalizeArchKVRequest is the part of auto selection
@@ -461,8 +462,11 @@ func goldenPlanDryRun(t *testing.T, c goldenPlanCase) goldenPlanRecord {
 func goldenPlanInputs(t *testing.T, name string, model *placement.ModelProfile, be *backendInfo, beforeBackend func(req *launchRequest, model *placement.ModelProfile, caps *detect.Capabilities)) planInputs {
 	t.Helper()
 	return planInputs{
-		Policy:    dryRunPlanPolicy,
-		Detect:    func() (*detect.Capabilities, error) { return &detect.Capabilities{}, nil },
+		Policy: dryRunPlanPolicy,
+		Detect: func() (*detect.Capabilities, error) {
+			t.Errorf("%s: an inventory plan detected this host's hardware", name)
+			return &detect.Capabilities{}, nil
+		},
 		Inventory: loadInventory,
 		Model:     func(string) (*placement.ModelProfile, error) { return model, nil },
 		ResolveBackend: func(req *launchRequest, m *placement.ModelProfile, caps *detect.Capabilities) *backendInfo {
@@ -533,10 +537,6 @@ func TestGoldenPlanSyntheticMatrix(t *testing.T) {
 	t.Setenv("LLM_CONFIG", filepath.Join(home, "missing-config"))
 	t.Setenv("LLM_APP_HOME", filepath.Join(home, "app"))
 	t.Setenv("LLM_SERVER_SKIP_DRAFT_DOWNLOAD", "1")
-	restoreResident := residentReviewerVRAM
-	residentReviewerVRAM = func(string) int { return 0 }
-	t.Cleanup(func() { residentReviewerVRAM = restoreResident })
-
 	// Every t.TempDir path of this test carries its name.
 	tempMarker := []byte("TestGoldenPlanSyntheticMatrix")
 	var records []goldenPlanRecord
@@ -548,7 +548,7 @@ func TestGoldenPlanSyntheticMatrix(t *testing.T) {
 		// run or on where the cache lives.
 		t.Run(c.name, func(t *testing.T) {
 			goldenPlanUnsetenv(t, "CUDA_VISIBLE_DEVICES", "GGML_VK_VISIBLE_DEVICES")
-			goldenPlanStubLiveVRAM(t)
+			goldenPlanFailLiveReaders(t)
 			record = goldenPlanDryRun(t, c)
 			first = goldenPlanMarshal(t, record)
 			second = goldenPlanMarshal(t, goldenPlanDryRun(t, c))
@@ -608,6 +608,31 @@ func TestGoldenPlanSyntheticMatrix(t *testing.T) {
 	}
 	goldenPlanLogEncoded(t, got)
 	t.Fatalf("launch plans differ from %s; if the change is intended, regenerate with -update-launch-plans", goldenPlanPath)
+}
+
+// goldenPlanFailLiveReaders makes this host's live readers fail the subtest.
+// An inventory plan uses readings derived from the inventory instead
+// (useInventoryReadings); they equal goldenPlanStubLiveVRAM's values and a
+// resident reviewer of 0, which is why the golden did not change when the
+// stubs were dropped.
+func goldenPlanFailLiveReaders(t *testing.T) {
+	t.Helper()
+	restoreUsed, restoreFree, restoreResident := runtimeVRAMUsedMB, fitDriverFreeVRAM, residentReviewerVRAM
+	runtimeVRAMUsedMB = func(int) int {
+		t.Error("an inventory plan read this host's used VRAM")
+		return 0
+	}
+	fitDriverFreeVRAM = func(*detect.Capabilities) map[int]int {
+		t.Error("an inventory plan read this host's driver free VRAM")
+		return nil
+	}
+	residentReviewerVRAM = func(string) int {
+		t.Error("an inventory plan scanned this host for a resident reviewer")
+		return 0
+	}
+	t.Cleanup(func() {
+		runtimeVRAMUsedMB, fitDriverFreeVRAM, residentReviewerVRAM = restoreUsed, restoreFree, restoreResident
+	})
 }
 
 // goldenPlanStubLiveVRAM replaces the fit guard's live readings for one
