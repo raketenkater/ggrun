@@ -71,7 +71,9 @@ type dryRunConsoleCase struct {
 	env  []string // extra child environment
 	// autoBackend installs the fake backend as <app home>/.bin/llama-server-cuda
 	// for automatic selection instead of naming it with --server-bin.
-	autoBackend bool
+	// "literal" appends the NUL-bracketed architecture name the loader probe
+	// looks for (backends.BackendSupportsArch) after the script's exit.
+	autoBackend string
 	json        bool // --emit-server-argv-json: record whether stdout is one JSON document
 }
 
@@ -89,6 +91,7 @@ const (
 	dryRunConsoleDense     = "models/Synthetic-Dense-8B-Q4_K_M.gguf"
 	dryRunConsoleDeepSeek4 = "models/Synthetic-DeepSeek4-Q4_K_M.gguf"
 	dryRunConsoleBackend   = "backend/llama-server"
+	dryRunConsoleNoFit     = "backend-nofit/llama-server"
 )
 
 func dryRunConsoleCases() []dryRunConsoleCase {
@@ -109,11 +112,17 @@ func dryRunConsoleCases() []dryRunConsoleCase {
 		{name: "trace-placement/gpu12/emit-json", args: dense("gpu12", "--emit-server-argv-json"), env: []string{"GGRUN_TRACE_PLACEMENT=1"}, json: true},
 		{name: "exposed-host/gpu12", args: dense("gpu12", "--host", "0.0.0.0")},
 		// Automatic backend selection: no --server-bin, the backend in the app home.
-		{name: "auto-backend/gpu12", args: []string{dryRunConsoleDense, "--inventory", "inventories/gpu12.json"}, autoBackend: true},
+		// The loader probe reads the script, finds no architecture literal and
+		// refuses it.
+		{name: "auto-backend/gpu12", args: []string{dryRunConsoleDense, "--inventory", "inventories/gpu12.json"}, autoBackend: "plain"},
+		{name: "auto-backend/arch-literal/gpu12", args: []string{dryRunConsoleDense, "--inventory", "inventories/gpu12.json"}, autoBackend: "literal"},
 		// A 4 GB dense model on a 2 GB card: CPU offload, an explicit context
-		// and GPU KV, which only the dry run's own fit check refuses.
-		{name: "fit-refusal/gpu2", args: dense("gpu2", "--ctx", "131072", "--kv-placement", "gpu")},
-		{name: "fit-refusal/gpu2/emit-json", args: dense("gpu2", "--ctx", "131072", "--kv-placement", "gpu", "--emit-server-argv-json"), json: true},
+		// and GPU KV. A backend with --fit plans no KV on the card, so the dry
+		// run's own fit check does not fire.
+		{name: "dense-offload-gpu-kv/gpu2", args: dense("gpu2", "--ctx", "131072", "--kv-placement", "gpu")},
+		{name: "dense-offload-gpu-kv/gpu2/emit-json", args: dense("gpu2", "--ctx", "131072", "--kv-placement", "gpu", "--emit-server-argv-json"), json: true},
+		// The same on a backend without --fit: dryRunFitRefusal's case.
+		{name: "fit-refusal/nofit-backend/gpu2", args: append([]string{dryRunConsoleDense, "--server-bin", dryRunConsoleNoFit, "--inventory", "inventories/gpu2.json"}, "--ctx", "131072", "--kv-placement", "gpu")},
 		{name: "gpus-index-missing/gpu12", args: dense("gpu12", "--gpus", "9")},
 		{name: "unknown-flag/gpu12", args: dense("gpu12", "--no-such-ggrun-flag")},
 		{name: "flag-missing-value", args: dense("gpu12", "--ctx")},
@@ -223,7 +232,7 @@ func TestDryRunConsoleGolden(t *testing.T) {
 func dryRunConsoleFixture(t *testing.T, python string) string {
 	t.Helper()
 	root := t.TempDir()
-	for _, dir := range []string{"bin", "backend", "models", "inventories"} {
+	for _, dir := range []string{"bin", "backend", "backend-nofit", "models", "inventories"} {
 		if err := os.MkdirAll(filepath.Join(root, dir), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -231,7 +240,8 @@ func dryRunConsoleFixture(t *testing.T, python string) string {
 	if err := os.Symlink(python, filepath.Join(root, "bin", "python3")); err != nil {
 		t.Fatal(err)
 	}
-	dryRunConsoleWriteBackend(t, filepath.Join(root, "backend"), "llama-server")
+	dryRunConsoleWriteBackend(t, filepath.Join(root, "backend"), "llama-server", goldenPlanMainlineHelp+goldenPlanMainlineFitHelp, "0000000", "")
+	dryRunConsoleWriteBackend(t, filepath.Join(root, "backend-nofit"), "llama-server", goldenPlanMainlineHelp, "0000001", "")
 	dryRunConsoleWriteDenseGGUF(t, filepath.Join(root, dryRunConsoleDense), "llama", "Synthetic Dense 8B")
 	dryRunConsoleWriteDenseGGUF(t, filepath.Join(root, dryRunConsoleDeepSeek4), "deepseek4", "Synthetic DeepSeek4")
 	inventories := map[string]string{
@@ -259,12 +269,16 @@ func dryRunConsoleRun(t *testing.T, c dryRunConsoleCase, root string) dryRunCons
 		}
 	}
 	appHome := filepath.Join(home, "app")
-	if c.autoBackend {
+	if c.autoBackend != "" {
 		dir := filepath.Join(appHome, ".bin")
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatal(err)
 		}
-		dryRunConsoleWriteBackend(t, dir, "llama-server-cuda")
+		tail := ""
+		if c.autoBackend == "literal" {
+			tail = "\x00llama\x00"
+		}
+		dryRunConsoleWriteBackend(t, dir, "llama-server-cuda", goldenPlanMainlineHelp+goldenPlanMainlineFitHelp, "0000000", tail)
 	}
 	encodedArgs, err := json.Marshal(c.args)
 	if err != nil {
@@ -323,19 +337,23 @@ func dryRunConsoleOneJSON(out []byte) bool {
 }
 
 // dryRunConsoleWriteBackend writes a fake llama-server: a shell script that
-// prints the mainline help fixture for --help and a fixed version for
-// --version, using shell builtins only (PATH holds nothing but python3). Its
-// size and mtime are fixed, so its build identity is the same in every run.
-func dryRunConsoleWriteBackend(t *testing.T, dir, name string) {
+// prints help for --help and a fixed version for --version, using shell
+// builtins only (PATH holds nothing but python3). Its size and mtime are fixed,
+// so its build identity is the same in every run. A non-empty tail follows an
+// exit the shell never reads past.
+func dryRunConsoleWriteBackend(t *testing.T, dir, name, help, commit, tail string) {
 	t.Helper()
 	script := "#!/bin/sh\n" +
 		"d=${0%/*}\n" +
 		"f=\"$d/help.txt\"\n" +
 		"[ \"$1\" = --version ] && f=\"$d/version.txt\"\n" +
 		"while IFS= read -r line || [ -n \"$line\" ]; do printf '%s\\n' \"$line\"; done < \"$f\"\n"
+	if tail != "" {
+		script += "exit 0\n" + tail
+	}
 	files := map[string]string{
-		"help.txt":    goldenPlanMainlineHelp + goldenPlanMainlineFitHelp,
-		"version.txt": "version: 9999 (0000000)\nbuilt with synthetic golden toolchain for x86_64-linux-gnu\n",
+		"help.txt":    help,
+		"version.txt": "version: 9999 (" + commit + ")\nbuilt with synthetic golden toolchain for x86_64-linux-gnu\n",
 	}
 	for name, body := range files {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
