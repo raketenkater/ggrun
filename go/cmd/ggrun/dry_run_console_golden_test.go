@@ -18,6 +18,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/raketenkater/ggrun/pkg/claudesession"
 )
 
 // Golden console output of the real `ggrun dry-run` (review W11).
@@ -81,6 +83,11 @@ type dryRunConsoleCase struct {
 	// viaMain runs the child through main with args as its command line
 	// (args[0] is the command), so the real argument dispatch is covered.
 	viaMain bool
+	// sessionTokens, when set, records the Claude session
+	// dryRunConsoleSessionID in the child's cache and writes its Claude Code
+	// transcript under the child's home, its last turn holding this many
+	// tokens.
+	sessionTokens int
 }
 
 // jsonMode reports whether the case asks for --emit-server-argv-json: the
@@ -103,8 +110,20 @@ type dryRunConsoleRecord struct {
 const (
 	dryRunConsoleDense     = "models/Synthetic-Dense-8B-Q4_K_M.gguf"
 	dryRunConsoleDeepSeek4 = "models/Synthetic-DeepSeek4-Q4_K_M.gguf"
-	dryRunConsoleBackend   = "backend/llama-server"
-	dryRunConsoleNoFit     = "backend-nofit/llama-server"
+	// The dense model with a 1,048,576-token native context, so a resumed
+	// session can need more per slot than the first plan gives and still fit
+	// the model.
+	dryRunConsoleLongCtx = "models/Synthetic-Dense-8B-1M-Q4_K_M.gguf"
+	dryRunConsoleBackend = "backend/llama-server"
+	dryRunConsoleNoFit   = "backend-nofit/llama-server"
+
+	// The recorded Claude session the resume cases name, and the working
+	// directory it was recorded in (fixed, so its transcript's project
+	// directory does not depend on the fixture root).
+	dryRunConsoleSessionID      = "0d5e2f4a-6b1c-4e8d-9a7f-3c2b1a0e9d8c"
+	dryRunConsoleSessionWorkDir = "/golden/work"
+	// A session id with no record anywhere.
+	dryRunConsoleMissingSessionID = "7a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
 )
 
 func dryRunConsoleCases() []dryRunConsoleCase {
@@ -177,6 +196,15 @@ func dryRunConsoleCases() []dryRunConsoleCase {
 		// --gpus on an inventory with no GPU is rejected before planning.
 		{name: "gpus-index/no-gpu-inventory", args: dense("cpu", "--gpus", "0")},
 		{name: "gpus-index/no-gpu-inventory/emit-json", args: dense("cpu", "--gpus", "0", "--emit-server-argv-json")},
+		// --claude-resume: the dry run runs the launch's resume-context step.
+		// A 1,000,000-token session needs 1,036,288 per slot, more than the
+		// first plan gives, so the plan is redone with that context; the
+		// re-plan line is on stdout, or on stderr in JSON mode.
+		{name: "claude-resume/long-ctx/gpu12", args: on(dryRunConsoleLongCtx, "gpu12", "--claude-resume", dryRunConsoleSessionID), sessionTokens: 1000000},
+		{name: "claude-resume/long-ctx/gpu12/emit-json", args: on(dryRunConsoleLongCtx, "gpu12", "--claude-resume", dryRunConsoleSessionID, "--emit-server-argv-json"), sessionTokens: 1000000},
+		// A session this machine has no record of: the plan is the first plan
+		// and the dry run says the size could not be read.
+		{name: "claude-resume/session-missing/gpu12", args: on(dryRunConsoleLongCtx, "gpu12", "--claude-resume", dryRunConsoleMissingSessionID)},
 	}
 }
 
@@ -324,8 +352,9 @@ func dryRunConsoleFixture(t *testing.T, python string) string {
 	}
 	dryRunConsoleWriteBackend(t, filepath.Join(root, "backend"), "llama-server", goldenPlanMainlineHelp+goldenPlanMainlineFitHelp, "0000000", "")
 	dryRunConsoleWriteBackend(t, filepath.Join(root, "backend-nofit"), "llama-server", goldenPlanMainlineHelp, "0000001", "")
-	dryRunConsoleWriteDenseGGUF(t, filepath.Join(root, dryRunConsoleDense), "llama", "Synthetic Dense 8B")
-	dryRunConsoleWriteDenseGGUF(t, filepath.Join(root, dryRunConsoleDeepSeek4), "deepseek4", "Synthetic DeepSeek4")
+	dryRunConsoleWriteDenseGGUF(t, filepath.Join(root, dryRunConsoleDense), "llama", "Synthetic Dense 8B", 131072)
+	dryRunConsoleWriteDenseGGUF(t, filepath.Join(root, dryRunConsoleDeepSeek4), "deepseek4", "Synthetic DeepSeek4", 131072)
+	dryRunConsoleWriteDenseGGUF(t, filepath.Join(root, dryRunConsoleLongCtx), "llama", "Synthetic Dense 8B 1M", 1048576)
 	inventories := map[string]string{
 		"gpu12":  goldenPlanInventories["gpu12"],
 		"mixed3": goldenPlanInventories["mixed3"],
@@ -373,6 +402,9 @@ func dryRunConsoleRun(t *testing.T, c dryRunConsoleCase, root string) dryRunCons
 			tail = "\x00llama\x00"
 		}
 		dryRunConsoleWriteBackend(t, dir, "llama-server-cuda", goldenPlanMainlineHelp+goldenPlanMainlineFitHelp, "0000000", tail)
+	}
+	if c.sessionTokens > 0 {
+		dryRunConsoleWriteSession(t, home, filepath.Join(home, "cache"), c.sessionTokens)
 	}
 	encodedArgs, err := json.Marshal(c.args)
 	if err != nil {
@@ -422,6 +454,28 @@ func dryRunConsoleRun(t *testing.T, c dryRunConsoleCase, root string) dryRunCons
 	return record
 }
 
+// dryRunConsoleWriteSession records dryRunConsoleSessionID the way a launch
+// does (the ggrun cache's session record) and writes the Claude Code
+// transcript a resume measures: one assistant turn with tokens of context.
+func dryRunConsoleWriteSession(t *testing.T, home, cacheDir string, tokens int) {
+	t.Helper()
+	record := fmt.Sprintf(`{"session_id":%q,"recorded":"2026-01-01T00:00:00Z","work_dir":%q,"model_path":%q}`+"\n",
+		dryRunConsoleSessionID, dryRunConsoleSessionWorkDir, dryRunConsoleLongCtx)
+	transcript := fmt.Sprintf(`{"type":"assistant","message":{"role":"assistant","usage":{"input_tokens":%d,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}`+"\n", tokens)
+	files := map[string]string{
+		filepath.Join(cacheDir, "claude-sessions", dryRunConsoleSessionID+".json"):                                                         record,
+		filepath.Join(home, ".claude", "projects", claudesession.ProjectKey(dryRunConsoleSessionWorkDir), dryRunConsoleSessionID+".jsonl"): transcript,
+	}
+	for path, body := range files {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 // dryRunConsoleOneJSON reports whether out is exactly one JSON document and
 // nothing else (one trailing newline allowed).
 func dryRunConsoleOneJSON(out []byte) bool {
@@ -468,17 +522,17 @@ func dryRunConsoleWriteBackend(t *testing.T, dir, name, help, commit, tail strin
 }
 
 // dryRunConsoleWriteDenseGGUF writes a dense GGUF of about 4 GB with the given
-// architecture key prefix:
+// architecture key prefix and native context:
 // 32 layers, 4096 hidden, 32 heads (8 KV), 14336 FF, 32000 tokens, Q4_K
 // weights and a Q6_K head. The header and tensor table are real; the tensor
 // data is a sparse hole, which parse_gguf.py never reads (it sizes tensors by
 // their offsets and the file size).
-func dryRunConsoleWriteDenseGGUF(t *testing.T, path, arch, name string) {
+func dryRunConsoleWriteDenseGGUF(t *testing.T, path, arch, name string, ctx uint32) {
 	t.Helper()
 	const (
-		layers, embd, heads, headsKV, ff, vocab, ctx = 32, 4096, 32, 8, 14336, 32000, 131072
-		typeF32, typeQ4K, typeQ6K                    = 0, 12, 14
-		align                                        = 32
+		layers, embd, heads, headsKV, ff, vocab = 32, 4096, 32, 8, 14336, 32000
+		typeF32, typeQ4K, typeQ6K               = 0, 12, 14
+		align                                   = 32
 	)
 	type tensor struct {
 		name  string
