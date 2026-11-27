@@ -205,6 +205,9 @@ func dryRunConsoleCases() []dryRunConsoleCase {
 		// A session this machine has no record of: the plan is the first plan
 		// and the dry run says the size could not be read.
 		{name: "claude-resume/session-missing/gpu12", args: on(dryRunConsoleLongCtx, "gpu12", "--claude-resume", dryRunConsoleMissingSessionID)},
+		// The same session on a host with 16 GB of free RAM: no plan holds its
+		// KV, and the dry run prints the launch's warning.
+		{name: "claude-resume/long-ctx/gpu12-ram16", args: on(dryRunConsoleLongCtx, "gpu12-ram16", "--claude-resume", dryRunConsoleSessionID), sessionTokens: 1000000},
 	}
 }
 
@@ -352,14 +355,22 @@ func dryRunConsoleFixture(t *testing.T, python string) string {
 	}
 	dryRunConsoleWriteBackend(t, filepath.Join(root, "backend"), "llama-server", goldenPlanMainlineHelp+goldenPlanMainlineFitHelp, "0000000", "")
 	dryRunConsoleWriteBackend(t, filepath.Join(root, "backend-nofit"), "llama-server", goldenPlanMainlineHelp, "0000001", "")
-	dryRunConsoleWriteDenseGGUF(t, filepath.Join(root, dryRunConsoleDense), "llama", "Synthetic Dense 8B", 131072)
-	dryRunConsoleWriteDenseGGUF(t, filepath.Join(root, dryRunConsoleDeepSeek4), "deepseek4", "Synthetic DeepSeek4", 131072)
-	dryRunConsoleWriteDenseGGUF(t, filepath.Join(root, dryRunConsoleLongCtx), "llama", "Synthetic Dense 8B 1M", 1048576)
+	// The two 131072-token models omit attention.key_length/value_length, as
+	// older converts do; the planner then prices their KV at 0 MiB (see
+	// computeKVTotalMB), and their records pin that. The 1M model states
+	// both (128), so its KV is charged: 32 layers x 8 KV heads x (128+128)
+	// = 65,536 elements per token, 68 KiB at q8_0 (68 MiB per 1k tokens) and
+	// 128 KiB at f16.
+	dryRunConsoleWriteDenseGGUF(t, filepath.Join(root, dryRunConsoleDense), "llama", "Synthetic Dense 8B", 131072, false)
+	dryRunConsoleWriteDenseGGUF(t, filepath.Join(root, dryRunConsoleDeepSeek4), "deepseek4", "Synthetic DeepSeek4", 131072, false)
+	dryRunConsoleWriteDenseGGUF(t, filepath.Join(root, dryRunConsoleLongCtx), "llama", "Synthetic Dense 8B 1M", 1048576, true)
 	inventories := map[string]string{
 		"gpu12":  goldenPlanInventories["gpu12"],
 		"mixed3": goldenPlanInventories["mixed3"],
 		"gpu2":   goldenPlanInventory(goldenPlanGPU(0, 2048, 16, 224000)),
 		"cpu":    goldenPlanInventories["cpu"],
+		// gpu12 with 16 GB of free host RAM: too little for a 1M-token KV.
+		"gpu12-ram16": strings.Replace(goldenPlanInventories["gpu12"], `"free_mb":122880`, `"free_mb":16384`, 1),
 		"dup-index": goldenPlanInventory(goldenPlanGPU(0, 12288, 16, 504000),
 			dryRunConsoleGPUBus(0, 24576, 16, 1008000, "00000000:02:00.0")),
 		"gap":      goldenPlanInventory(goldenPlanGPU(0, 12288, 16, 504000), goldenPlanGPU(2, 12288, 8, 360000)),
@@ -524,10 +535,11 @@ func dryRunConsoleWriteBackend(t *testing.T, dir, name, help, commit, tail strin
 // dryRunConsoleWriteDenseGGUF writes a dense GGUF of about 4 GB with the given
 // architecture key prefix and native context:
 // 32 layers, 4096 hidden, 32 heads (8 KV), 14336 FF, 32000 tokens, Q4_K
-// weights and a Q6_K head. The header and tensor table are real; the tensor
+// weights and a Q6_K head. headDims states attention.key_length and
+// value_length (128 each). The header and tensor table are real; the tensor
 // data is a sparse hole, which parse_gguf.py never reads (it sizes tensors by
 // their offsets and the file size).
-func dryRunConsoleWriteDenseGGUF(t *testing.T, path, arch, name string, ctx uint32) {
+func dryRunConsoleWriteDenseGGUF(t *testing.T, path, arch, name string, ctx uint32, headDims bool) {
 	t.Helper()
 	const (
 		layers, embd, heads, headsKV, ff, vocab = 32, 4096, 32, 8, 14336, 32000
@@ -581,7 +593,11 @@ func dryRunConsoleWriteDenseGGUF(t *testing.T, path, arch, name string, ctx uint
 	buf.WriteString("GGUF")
 	le(uint32(3))
 	le(uint64(len(tensors)))
-	le(uint64(11)) // metadata count
+	metadata := uint64(11)
+	if headDims {
+		metadata += 2
+	}
+	le(metadata)
 	text("general.architecture", arch)
 	text("general.name", name)
 	u32(arch+".block_count", layers)
@@ -591,6 +607,10 @@ func dryRunConsoleWriteDenseGGUF(t *testing.T, path, arch, name string, ctx uint
 	u32(arch+".attention.head_count", heads)
 	u32(arch+".attention.head_count_kv", headsKV)
 	u32(arch+".rope.dimension_count", embd/heads)
+	if headDims {
+		u32(arch+".attention.key_length", embd/heads)
+		u32(arch+".attention.value_length", embd/heads)
+	}
 	text("tokenizer.ggml.model", "llama")
 	str("tokenizer.ggml.tokens")
 	le(uint32(9)) // array
