@@ -216,6 +216,81 @@ func TestPlanLaunchErrorsAreValuesInTodaysOrder(t *testing.T) {
 	})
 }
 
+// planLaunch refuses a --gpus selection the hardware view does not have with
+// the launch's own text and exit status ("Error: " + validateRequestedGPUs,
+// exit 1), before the model is read, a backend is resolved or anything is
+// placed. A valid selection plans as before.
+func TestPlanLaunchRejectsMissingGPUsLikeTheLaunch(t *testing.T) {
+	launchOrderTestEnv(t)
+	goldenPlanUnsetenv(t, "LLAMA_API_KEY")
+	const (
+		gpu12   = "NVIDIA synthetic 12 GB"
+		gpu24   = "NVIDIA synthetic 24 GB"
+		mixedHW = "0 (" + gpu12 + "), 1 (" + gpu24 + "), 2 (" + gpu12 + ")"
+	)
+	for _, tc := range []struct {
+		name, hw, gpus, want string
+		detected             bool // hardware from Detect instead of --inventory
+	}{
+		{name: "inventory/one-missing", hw: "gpu12", gpus: "9", want: "Error: --gpus 9: no GPU with index 9; this machine has 0 (" + gpu12 + ")"},
+		{name: "inventory/several-missing", hw: "mixed3", gpus: "0,5,7", want: "Error: --gpus 0,5,7: no GPU with index 5, 7; this machine has " + mixedHW},
+		{name: "inventory/no-gpus", hw: "cpu", gpus: "0", want: "Error: --gpus 0: no GPUs were detected on this machine"},
+		{name: "detected/one-missing", hw: "mixed3", gpus: "3", want: "Error: --gpus 3: no GPU with index 3; this machine has " + mixedHW, detected: true},
+	} {
+		c := launchOrderCase{goldenPlanCase: goldenPlanCase{name: "planlaunch-gpus/" + tc.name, hw: tc.hw, model: "dense-small"}}
+		launchOrderRunCase(t, c, func(t *testing.T) {
+			req, model := planLaunchFixture(t, c.hw, c.model, "--gpus", tc.gpus)
+			in := goldenPlanInputs(t, c.name, model, goldenPlanBackend(t, ""), nil)
+			in.Inventory = planLaunchSilentInventory
+			if tc.detected {
+				req.InventoryPath = ""
+				caps, err := detect.LoadCapabilities([]byte(goldenPlanInventories[tc.hw]))
+				if err != nil {
+					t.Fatal(err)
+				}
+				in.Detect = func() (*detect.Capabilities, error) { return caps, nil }
+			}
+			in.Model = func(string) (*placement.ModelProfile, error) {
+				t.Error("the model was read after a --gpus index the hardware does not have")
+				return model, nil
+			}
+			in.ResolveBackend = func(*launchRequest, *placement.ModelProfile, *detect.Capabilities) *backendInfo {
+				t.Error("a backend was resolved after a --gpus index the hardware does not have")
+				return nil
+			}
+			in.ListVulkan = func(string) ([]listedDevice, error) {
+				t.Error("Vulkan devices were listed after a --gpus index the hardware does not have")
+				return nil, nil
+			}
+			notes := planLaunchCollect(&in)
+			plan, planErr := planLaunch(req, in)
+			planLaunchExpectError(t, plan, planErr, 1, tc.want)
+			// The launch prints "Error: " + validateRequestedGPUs(caps, req) and exits 1.
+			caps, err := detect.LoadCapabilities([]byte(goldenPlanInventories[tc.hw]))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if launchErr := validateRequestedGPUs(caps, req); launchErr == nil || "Error: "+launchErr.Error() != planErr.Message {
+				t.Fatalf("launch check = %v, plan message %q", launchErr, planErr.Message)
+			}
+			if len(*notes) != 0 {
+				t.Fatalf("notes = %+v", *notes)
+			}
+		})
+	}
+
+	c := launchOrderCase{goldenPlanCase: goldenPlanCase{name: "planlaunch-gpus/valid", hw: "mixed3", model: "dense-small"}}
+	launchOrderRunCase(t, c, func(t *testing.T) {
+		req, model := planLaunchFixture(t, c.hw, c.model, "--gpus", "1")
+		in := goldenPlanInputs(t, c.name, model, goldenPlanBackend(t, ""), nil)
+		in.Inventory = planLaunchSilentInventory
+		plan, planErr := planLaunch(req, in)
+		if planErr != nil || plan == nil || plan.Refusal != nil || len(plan.ServerArgv) == 0 {
+			t.Fatalf("plan %+v, error %+v; want a plan", plan, planErr)
+		}
+	})
+}
+
 // planLaunchCapture redirects os.Stdout and os.Stderr; the returned function
 // restores both and returns what was written to each.
 func planLaunchCapture(t *testing.T) func() (string, string) {

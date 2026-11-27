@@ -139,7 +139,15 @@ func dryRunConsoleCases() []dryRunConsoleCase {
 		// keeps -ngl 999 for a model larger than the card (the known latent
 		// defect the plan golden's nofit case records).
 		{name: "dense-offload-gpu-kv/nofit-backend/gpu2", args: append([]string{dryRunConsoleDense, "--server-bin", dryRunConsoleNoFit, "--inventory", "inventories/gpu2.json"}, "--ctx", "131072", "--kv-placement", "gpu")},
+		// planLaunch rejects a --gpus index the hardware view lacks, with the
+		// launch's own message, before the model is read.
 		{name: "gpus-index-missing/gpu12", args: dense("gpu12", "--gpus", "9")},
+		{name: "gpus-index-missing/mixed3/emit-json", args: dense("mixed3", "--gpus", "0,5", "--emit-server-argv-json")},
+		// parseLaunchArgs rejects these first (exit 2), launch and dry run alike.
+		{name: "gpus-duplicate/mixed3", args: dense("mixed3", "--gpus", "1,1")},
+		{name: "gpus-malformed/mixed3", args: dense("mixed3", "--gpus", "1,x")},
+		// A valid selection of a card that is not index 0 plans as before.
+		{name: "gpus-valid/mixed3", args: dense("mixed3", "--gpus", "1")},
 		{name: "unknown-flag/gpu12", args: dense("gpu12", "--no-such-ggrun-flag")},
 		{name: "flag-missing-value", args: dense("gpu12", "--ctx")},
 		{name: "no-model", args: []string{"--inventory", "inventories/gpu12.json"}},
