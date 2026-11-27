@@ -12,7 +12,7 @@ import (
 
 // planLaunch computes the dry run's initial plan (review W11, step 5): the
 // adjusted request, hardware view, model, backend, strategy, server argv,
-// environment additions, memory limit and launch scope. It never calls
+// environment additions, memory limits and launch scope. It never calls
 // os.Exit, never writes the process environment and prints nothing itself:
 // its notes go to in.Note in the order and on the stream cmdDryRun used to
 // print them, and an error that ends the dry run comes back as a planError.
@@ -135,8 +135,7 @@ func planLaunch(req *launchRequest, in planInputs) (*launchPlan, *planError) {
 			plan.EnvPrefix = key + "=" + value
 		}
 	}
-	plan.Environment = launchPlanEnvironment(plan.ServerArgv, plan.EnvPrefix, be.Path)
-	plan.MemoryMaxMB = backendMemoryMaxMB(req, caps)
+	plan.Environment, plan.MemoryHighMB, plan.MemoryMaxMB = planBackendProcess(req, caps, be, plan.ServerArgv, plan.EnvPrefix)
 	// The name a crash log would be filed under. Exposed because it is a
 	// hash: when recovery silently fails to find a previous OOM, the only
 	// way to see why is to compare this between two runs.
@@ -162,13 +161,36 @@ type launchPlan struct {
 	Backend  *backendInfo
 	Strategy *placement.Strategy
 	// Refusal is the dry run's fit refusal. When set, the plan stops at the
-	// strategy: no argv, environment, memory limit or scope is computed.
-	Refusal     *planError
-	ServerArgv  []string
-	EnvPrefix   string            // the GPU visibility or Vulkan order assignment the summary shows
-	Environment map[string]string // launchPlanEnvironment, the plan JSON's "environment"
-	MemoryMaxMB int               // backendMemoryMaxMB, the plan JSON's "memory_max_mb"
-	LaunchScope string            // claudeLaunchLogScope, the plan JSON's "launch_scope"
+	// strategy: no argv, environment, memory limits or scope is computed.
+	Refusal      *planError
+	ServerArgv   []string
+	EnvPrefix    string            // the GPU visibility or Vulkan order assignment the summary shows
+	Environment  map[string]string // planBackendProcess, the plan JSON's "environment"
+	MemoryHighMB int               // planBackendProcess, the plan JSON's "memory_high_mb"
+	MemoryMaxMB  int               // planBackendProcess, the plan JSON's "memory_max_mb"
+	LaunchScope  string            // claudeLaunchLogScope, the plan JSON's "launch_scope"
+}
+
+// planBackendProcess is the environment and memory scope a launch starts the
+// backend with for serverArgs. The limits and the environment overrides come
+// from the call startLaunchProcess makes, backendStartOptions(req, caps, be,
+// hostExpertPinningEnv(be, serverArgs), serverArgs), so they are the values the
+// backend's scope gets: MemoryMax raised to the host reclaim ceiling for
+// mmap-backed experts and banded for lazy sparse lookup. The overrides (today
+// GGML_CUDA_NO_PINNED=1 for ik with CPU experts) are laid over
+// launchPlanEnvironment last, because the launch applies them after
+// server.ChildEnv (server.OverrideEnv, or /usr/bin/env inside the scope). They
+// are values the plan derives; nothing beyond launchPlanEnvironment's
+// allow-list is read from this process's environment.
+func planBackendProcess(req *launchRequest, caps *detect.Capabilities, be *backendInfo, serverArgs []string, envPrefix string) (env map[string]string, memoryHighMB, memoryMaxMB int) {
+	start := backendStartOptions(req, caps, be, hostExpertPinningEnv(be, serverArgs), serverArgs)
+	env = launchPlanEnvironment(serverArgs, envPrefix, be.Path)
+	for _, item := range start.EnvOverrides {
+		if key, value, ok := strings.Cut(item, "="); ok && key != "" {
+			env[key] = value
+		}
+	}
+	return env, start.MemoryHighMB, start.MemoryMaxMB
 }
 
 // useInventoryReadings points the live readers planning consults at inv for

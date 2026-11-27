@@ -16,6 +16,7 @@
       "claude_profile": "agent-parallel",
       "launch_scope": "0b7d427fff06531cec29ff0c",
       "memory_max_mb": 116326,
+      "memory_high_mb": 116326,
       "environment": {
         "CUDA_DEVICE_ORDER": "PCI_BUS_ID",
         "CUDA_VISIBLE_DEVICES": "1"
@@ -162,6 +163,7 @@
       "claude_profile": "agent-parallel",
       "launch_scope": "0b7d427fff06531cec29ff0c",
       "memory_max_mb": 116326,
+      "memory_high_mb": 116326,
       "environment": {
         "CUDA_DEVICE_ORDER": "PCI_BUS_ID",
         "CUDA_VISIBLE_DEVICES": "1"
@@ -256,6 +258,7 @@
       "claude_profile": "agent-parallel",
       "launch_scope": "1a3cf20b61fe47510fc91135",
       "memory_max_mb": 116326,
+      "memory_high_mb": 116326,
       "environment": {
         "CUDA_DEVICE_ORDER": "PCI_BUS_ID",
         "CUDA_SCALE_LAUNCH_QUEUES": "4x",
@@ -426,6 +429,7 @@
       "claude_profile": "agent-parallel",
       "launch_scope": "1a3cf20b61fe47510fc91135",
       "memory_max_mb": 116326,
+      "memory_high_mb": 116326,
       "environment": {
         "CUDA_DEVICE_ORDER": "PCI_BUS_ID",
         "CUDA_SCALE_LAUNCH_QUEUES": "4x",
@@ -528,6 +532,7 @@
       "claude_profile": "agent-parallel",
       "launch_scope": "aec1d224cc270864276c76a7",
       "memory_max_mb": 116326,
+      "memory_high_mb": 116326,
       "environment": {
         "CUDA_DEVICE_ORDER": "PCI_BUS_ID",
         "CUDA_VISIBLE_DEVICES": "0,2"
@@ -680,6 +685,7 @@
       "claude_profile": "agent-parallel",
       "launch_scope": "aec1d224cc270864276c76a7",
       "memory_max_mb": 116326,
+      "memory_high_mb": 116326,
       "environment": {
         "CUDA_DEVICE_ORDER": "PCI_BUS_ID",
         "CUDA_VISIBLE_DEVICES": "0,2"
@@ -766,6 +772,7 @@
       "backend_identity": "golden-mainline-build+load-mode-v2",
       "launch_scope": "97c6538c473b3654c7fc2dc9",
       "memory_max_mb": 116326,
+      "memory_high_mb": 116326,
       "environment": {
         "CUDA_DEVICE_ORDER": "PCI_BUS_ID",
         "CUDA_VISIBLE_DEVICES": "-1"
@@ -872,6 +879,7 @@
       "backend_identity": "golden-mainline-build+load-mode-v2",
       "launch_scope": "97c6538c473b3654c7fc2dc9",
       "memory_max_mb": 116326,
+      "memory_high_mb": 116326,
       "environment": {
         "CUDA_DEVICE_ORDER": "PCI_BUS_ID",
         "CUDA_VISIBLE_DEVICES": "-1"
@@ -933,6 +941,7 @@
       "backend_identity": "golden-mainline-build+load-mode-v2",
       "launch_scope": "51cf475cb67014e7e75f64eb",
       "memory_max_mb": 116326,
+      "memory_high_mb": 116326,
       "environment": {
         "CUDA_DEVICE_ORDER": "PCI_BUS_ID",
         "CUDA_SCALE_LAUNCH_QUEUES": "4x"
@@ -1092,6 +1101,7 @@
       "backend_identity": "golden-mainline-build+load-mode-v2",
       "launch_scope": "51cf475cb67014e7e75f64eb",
       "memory_max_mb": 116326,
+      "memory_high_mb": 116326,
       "environment": {
         "CUDA_DEVICE_ORDER": "PCI_BUS_ID",
         "CUDA_SCALE_LAUNCH_QUEUES": "4x"
@@ -1171,6 +1181,7 @@
       "claude_profile": "agent-parallel",
       "launch_scope": "cc16f9a5a193d98bf6bcf4c6",
       "memory_max_mb": 116326,
+      "memory_high_mb": 116326,
       "environment": {
         "CUDA_DEVICE_ORDER": "PCI_BUS_ID"
       },
@@ -1320,6 +1331,7 @@
       "claude_profile": "agent-parallel",
       "launch_scope": "cc16f9a5a193d98bf6bcf4c6",
       "memory_max_mb": 116326,
+      "memory_high_mb": 116326,
       "environment": {
         "CUDA_DEVICE_ORDER": "PCI_BUS_ID"
       },
@@ -1415,6 +1427,7 @@
       "claude_profile": "agent-parallel",
       "launch_scope": "cc16f9a5a193d98bf6bcf4c6",
       "memory_max_mb": 116326,
+      "memory_high_mb": 116326,
       "environment": {
         "CUDA_DEVICE_ORDER": "PCI_BUS_ID"
       },
@@ -1563,6 +1576,7 @@
       "claude_profile": "agent-parallel",
       "launch_scope": "cc16f9a5a193d98bf6bcf4c6",
       "memory_max_mb": 116326,
+      "memory_high_mb": 116326,
       "environment": {
         "CUDA_DEVICE_ORDER": "PCI_BUS_ID"
       },
@@ -1654,8 +1668,10 @@
       "backend_identity": "golden-ik-build",
       "launch_scope": "f832883cf739418848ed0592",
       "memory_max_mb": 116326,
+      "memory_high_mb": 116326,
       "environment": {
-        "CUDA_DEVICE_ORDER": "PCI_BUS_ID"
+        "CUDA_DEVICE_ORDER": "PCI_BUS_ID",
+        "GGML_CUDA_NO_PINNED": "1"
       },
       "server_argv": [
         "/usr/bin/ggrun-golden-ik-llama-server",
@@ -1778,8 +1794,10 @@
       "backend_identity": "golden-ik-build",
       "launch_scope": "f832883cf739418848ed0592",
       "memory_max_mb": 116326,
+      "memory_high_mb": 116326,
       "environment": {
-        "CUDA_DEVICE_ORDER": "PCI_BUS_ID"
+        "CUDA_DEVICE_ORDER": "PCI_BUS_ID",
+        "GGML_CUDA_NO_PINNED": "1"
       },
       "server_argv": [
         "/usr/bin/ggrun-golden-ik-llama-server",
@@ -1853,6 +1871,7 @@
       "backend_identity": "golden-mainline-build+load-mode-v2",
       "launch_scope": "83a37bd2cba51c7852843b96",
       "memory_max_mb": 116326,
+      "memory_high_mb": 116326,
       "environment": {
         "CUDA_DEVICE_ORDER": "PCI_BUS_ID"
       },
@@ -1972,6 +1991,7 @@
       "backend_identity": "golden-mainline-build+load-mode-v2",
       "launch_scope": "634739f830d4bf653f7c3462",
       "memory_max_mb": 116326,
+      "memory_high_mb": 116326,
       "environment": {
         "CUDA_DEVICE_ORDER": "PCI_BUS_ID"
       },
@@ -2043,6 +2063,7 @@
       "claude_profile": "agent-parallel",
       "launch_scope": "ac5775de0344b2f59ee5d8d3",
       "memory_max_mb": 116326,
+      "memory_high_mb": 116326,
       "environment": {
         "CUDA_DEVICE_ORDER": "PCI_BUS_ID"
       },
@@ -2180,6 +2201,7 @@
       "claude_profile": "agent-parallel",
       "launch_scope": "ac5775de0344b2f59ee5d8d3",
       "memory_max_mb": 116326,
+      "memory_high_mb": 116326,
       "environment": {
         "CUDA_DEVICE_ORDER": "PCI_BUS_ID"
       },
@@ -2264,6 +2286,7 @@
       "claude_profile": "agent-parallel",
       "launch_scope": "aec1d224cc270864276c76a7",
       "memory_max_mb": 116326,
+      "memory_high_mb": 116326,
       "environment": {
         "CUDA_DEVICE_ORDER": "PCI_BUS_ID"
       },
@@ -2398,6 +2421,7 @@
       "claude_profile": "agent-parallel",
       "launch_scope": "aec1d224cc270864276c76a7",
       "memory_max_mb": 116326,
+      "memory_high_mb": 116326,
       "environment": {
         "CUDA_DEVICE_ORDER": "PCI_BUS_ID"
       },
@@ -2481,6 +2505,7 @@
       "backend_identity": "golden-mainline-build+load-mode-v2",
       "launch_scope": "90d60e15819bd1492e03bf8d",
       "memory_max_mb": 116326,
+      "memory_high_mb": 116326,
       "environment": {
         "CUDA_DEVICE_ORDER": "PCI_BUS_ID"
       },
@@ -2592,6 +2617,7 @@
       "backend_identity": "golden-mainline-build+load-mode-v2",
       "launch_scope": "90d60e15819bd1492e03bf8d",
       "memory_max_mb": 116326,
+      "memory_high_mb": 116326,
       "environment": {
         "CUDA_DEVICE_ORDER": "PCI_BUS_ID"
       },
@@ -2654,6 +2680,7 @@
       "claude_profile": "agent-parallel",
       "launch_scope": "0b7d427fff06531cec29ff0c",
       "memory_max_mb": 116326,
+      "memory_high_mb": 116326,
       "environment": {
         "CUDA_DEVICE_ORDER": "PCI_BUS_ID"
       },
@@ -2797,6 +2824,7 @@
       "claude_profile": "agent-parallel",
       "launch_scope": "0b7d427fff06531cec29ff0c",
       "memory_max_mb": 116326,
+      "memory_high_mb": 116326,
       "environment": {
         "CUDA_DEVICE_ORDER": "PCI_BUS_ID"
       },
@@ -2891,6 +2919,7 @@
       "claude_profile": "agent-parallel",
       "launch_scope": "0b7d427fff06531cec29ff0c",
       "memory_max_mb": 116326,
+      "memory_high_mb": 116326,
       "environment": {
         "CUDA_DEVICE_ORDER": "PCI_BUS_ID"
       },
@@ -3037,6 +3066,7 @@
       "claude_profile": "agent-parallel",
       "launch_scope": "f6985062efb308cee58e4a9f",
       "memory_max_mb": 116326,
+      "memory_high_mb": 116326,
       "environment": {
         "CUDA_DEVICE_ORDER": "PCI_BUS_ID"
       },
@@ -3121,7 +3151,8 @@
       "backend_identity": "golden-mainline-build+load-mode-v2",
       "claude_profile": "agent-parallel",
       "launch_scope": "7ee9e626b68a206d9e5a51f6",
-      "memory_max_mb": 116326,
+      "memory_max_mb": 122880,
+      "memory_high_mb": 116326,
       "environment": {
         "CUDA_DEVICE_ORDER": "PCI_BUS_ID",
         "CUDA_SCALE_LAUNCH_QUEUES": "4x"
@@ -3303,7 +3334,8 @@
       "backend_identity": "golden-mainline-build+load-mode-v2",
       "claude_profile": "agent-parallel",
       "launch_scope": "7ee9e626b68a206d9e5a51f6",
-      "memory_max_mb": 116326,
+      "memory_max_mb": 122880,
+      "memory_high_mb": 116326,
       "environment": {
         "CUDA_DEVICE_ORDER": "PCI_BUS_ID",
         "CUDA_SCALE_LAUNCH_QUEUES": "4x"
@@ -3403,6 +3435,7 @@
       "claude_profile": "agent-parallel",
       "launch_scope": "c2baea6b5d70f1cd4ca83dbb",
       "memory_max_mb": 116326,
+      "memory_high_mb": 116326,
       "environment": {
         "CUDA_DEVICE_ORDER": "PCI_BUS_ID",
         "CUDA_SCALE_LAUNCH_QUEUES": "4x"
@@ -3586,6 +3619,7 @@
       "claude_profile": "agent-parallel",
       "launch_scope": "17932ae65a91839fae0c36d8",
       "memory_max_mb": 116326,
+      "memory_high_mb": 116326,
       "environment": {
         "CUDA_DEVICE_ORDER": "PCI_BUS_ID",
         "CUDA_SCALE_LAUNCH_QUEUES": "4x"
@@ -3679,7 +3713,8 @@
       "backend_tag": "llama",
       "backend_identity": "golden-mainline-build+load-mode-v2",
       "launch_scope": "22948c47e2521b8d5bb06b75",
-      "memory_max_mb": 27033,
+      "memory_max_mb": 28672,
+      "memory_high_mb": 27033,
       "environment": {
         "CUDA_DEVICE_ORDER": "PCI_BUS_ID"
       },
@@ -3816,7 +3851,8 @@
       "backend_tag": "llama",
       "backend_identity": "golden-mainline-build+load-mode-v2",
       "launch_scope": "22948c47e2521b8d5bb06b75",
-      "memory_max_mb": 27033,
+      "memory_max_mb": 28672,
+      "memory_high_mb": 27033,
       "environment": {
         "CUDA_DEVICE_ORDER": "PCI_BUS_ID"
       },
@@ -3940,7 +3976,8 @@
       "backend_tag": "llama",
       "backend_identity": "golden-mainline-build+load-mode-v2",
       "launch_scope": "22948c47e2521b8d5bb06b75",
-      "memory_max_mb": 27033,
+      "memory_max_mb": 28672,
+      "memory_high_mb": 27033,
       "environment": {
         "CUDA_DEVICE_ORDER": "PCI_BUS_ID"
       },
@@ -4030,6 +4067,7 @@
       "backend_identity": "golden-mainline-build+load-mode-v2",
       "launch_scope": "fd728efddb16cb7eaede42a6",
       "memory_max_mb": 27033,
+      "memory_high_mb": 27033,
       "environment": {
         "CUDA_DEVICE_ORDER": "PCI_BUS_ID"
       },
@@ -4139,6 +4177,7 @@
       "backend_identity": "golden-mainline-build+load-mode-v2",
       "launch_scope": "fd728efddb16cb7eaede42a6",
       "memory_max_mb": 27033,
+      "memory_high_mb": 27033,
       "environment": {
         "CUDA_DEVICE_ORDER": "PCI_BUS_ID"
       },
