@@ -388,7 +388,6 @@ func StartWithTimeoutToOptions(args []string, port int, timeout time.Duration, t
 	}
 
 	p := &Process{Cmd: cmd, Port: port, host: readinessHost(args), cancel: cancel, LogBuf: logBuf, done: make(chan struct{}), stopDone: make(chan struct{}), scopeUnit: scopeUnit, scopeMode: owner}
-	trackLive(p)
 	// Without this tie an abrupt ggrun exit on Windows (Ctrl+C during model
 	// load) left llama-server running and holding its VRAM.
 	if release, err := bindToParentLifetime(cmd); err != nil {
@@ -396,6 +395,7 @@ func StartWithTimeoutToOptions(args []string, port int, timeout time.Duration, t
 	} else {
 		p.releaseLifetime = release
 	}
+	trackLive(p)
 	if scopeUnit != "" {
 		// The scope argv clamps MemoryHigh to MemoryMax; record the same values.
 		p.recordMemoryLimits(min(opts.MemoryHighMB, opts.MemoryMaxMB), opts.MemoryMaxMB)

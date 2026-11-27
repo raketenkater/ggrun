@@ -348,7 +348,17 @@ jobs:
             awk -F'\t' 'NR>1 && $3!="-" { n++; if ($4+0 > 1) m++; if ($5=="yes") k++ } END { printf "traced tries %d, wrapper got more than one SIGTERM in %d, reached kill(-child, SIGKILL) in %d\n", n, m+0, k+0 }' "$straces"
             { echo '### Stop during load'; echo '```'; column -t -s "$(printf '\t')" "$table" || cat "$table"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           }
-          trap print_table EXIT
+          # Also on an abort or the step timeout: leave no unit, process or port
+          # behind for the later steps.
+          on_exit() {
+            set +e
+            cleanup_backends "${port:-0}"
+            systemctl --user stop ggrun 2>/dev/null
+            systemctl --user reset-failed 2>/dev/null
+            print_table
+          }
+          trap on_exit EXIT
+          trap 'exit 130' INT TERM HUP
           step_start=$SECONDS
           i=0
           # Controls first, then cycle the stop moments around readiness until
