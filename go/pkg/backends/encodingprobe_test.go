@@ -214,8 +214,12 @@ func TestProbeReadsTheTableBesideTheBinary(t *testing.T) {
 func TestProbeReadsTheTableInTheBinary(t *testing.T) {
 	bin := writeEncodingFixture(t, t.TempDir(), "llama-server", append([]byte("ELFish\x00"), ikTable...))
 	got := ProbeBackendEncodings(bin, "allowed: f16", []string{"Q8_0", "F16", "TQ1_0"})
-	if !got.Complete || got.Found["Q8_0"] != "llama-server" || got.Found["F16"] != "help" || !got.Absent("TQ1_0") {
+	if !got.Complete || got.Found["Q8_0"] != "llama-server" || !got.Absent("TQ1_0") || !got.Absent("tq1_0") {
 		t.Fatalf("%+v", got)
+	}
+	// F16 is only a tail of bf16 in this table: undetermined, whatever the help says.
+	if _, found := got.Found["F16"]; found || got.Undetermined["F16"] != "bf16" || got.Absent("F16") {
+		t.Fatalf("F16: %+v", got)
 	}
 }
 
@@ -233,16 +237,14 @@ func TestProbeWithoutTheTableProvesNothing(t *testing.T) {
 			t.Errorf("%s: %+v", label, got)
 		}
 	}
-	// Help alone is partial evidence: a hit is found, the rest stays open.
+	// Help alone proves nothing: its words are only hints.
 	got := ProbeBackendEncodings("", "allowed: f16", []string{"F16", "STQ1_0"})
-	if !reflect.DeepEqual(got.Found, map[string]string{"F16": "help"}) || got.Complete || got.Absent("STQ1_0") {
+	if len(got.Found) != 0 || got.Complete || got.TableSeen || got.Absent("STQ1_0") || got.Absent("F16") ||
+		!reflect.DeepEqual(got.HelpHints, []string{"F16"}) {
 		t.Fatalf("help only: %+v", got)
 	}
-	if got = ProbeBackendEncodings("", "", nil); !got.Complete {
+	if got = ProbeBackendEncodings("", "", nil); got.Complete || got.Absent("anything") {
 		t.Fatalf("no names: %+v", got)
-	}
-	if got = ProbeBackendEncodings("", "q8_0", []string{"Q8_0"}); !got.Complete || got.Found["Q8_0"] != "help" {
-		t.Fatalf("all in help: %+v", got)
 	}
 }
 
@@ -425,5 +427,91 @@ func TestProbeFileCutShortIsNotComplete(t *testing.T) {
 	got = probeBackendEncodings(bin, "", []string{"Q4_K", "STQ1_0"}, 1<<20, 1<<20, 48)
 	if !got.Complete || !got.Absent("STQ1_0") {
 		t.Fatalf("read in full: %+v", got)
+	}
+}
+
+// Real help output lists KV-cache types, not tensor encodings. These lines are
+// the --cache-type-k/-v entries of goldenPlanMainlineHelp and goldenPlanIKHelp
+// (go/cmd/ggrun/launch_plan_golden_test.go) plus the "allowed values" line that
+// common/arg.cpp prints under them (docs/usage.md lists the same set).
+const (
+	mainlineKVHelp = "-ctk,  --cache-type-k TYPE              KV cache data type for K (default: f16)\n" +
+		"-ctv,  --cache-type-v TYPE              KV cache data type for V (default: f16)\n" +
+		"                                        allowed values: f32, f16, bf16, q8_0, q4_0, q4_1, iq4_nl, q5_0, q5_1\n"
+	ikKVHelp = "-ctk,  --cache-type-k TYPE      KV cache data type for K (default: f16)\n" +
+		"-ctv,  --cache-type-v TYPE      KV cache data type for V (default: f16)\n"
+)
+
+// Help is never a source of Found or Absent: a name in the cache-type list is a
+// hint, and a table that lacks a name stays authoritative.
+func TestHelpTextIsOnlyAHint(t *testing.T) {
+	names := []string{"F16", "BF16", "Q8_0", "IQ4_NL", "Q4_K", "STQ1_0"}
+	table := writeEncodingFixture(t, t.TempDir(), "llama-server", []byte(ikTable))
+	for label, help := range map[string]string{"mainline": mainlineKVHelp, "ik": ikKVHelp, "empty": ""} {
+		got := ProbeBackendEncodings(table, help, names)
+		if !got.Complete || got.Found["Q8_0"] != "llama-server" || got.Found["IQ4_NL"] != "llama-server" ||
+			got.Found["Q4_K"] != "llama-server" || got.Found["BF16"] != "llama-server" {
+			t.Errorf("%s: table evidence changed: %+v", label, got)
+		}
+		if !got.Absent("STQ1_0") {
+			t.Errorf("%s: a help line must not rescue a name the table lacks: %+v", label, got)
+		}
+		if _, ok := got.Found["F16"]; ok || got.Undetermined["F16"] != "bf16" {
+			t.Errorf("%s: F16 %+v", label, got)
+		}
+	}
+	got := ProbeBackendEncodings(table, mainlineKVHelp, names)
+	if want := []string{"BF16", "F16", "IQ4_NL", "Q8_0"}; !reflect.DeepEqual(got.HelpHints, want) {
+		t.Errorf("mainline hints %v, want %v", got.HelpHints, want)
+	}
+	if got = ProbeBackendEncodings(table, ikKVHelp, names); !reflect.DeepEqual(got.HelpHints, []string{"F16"}) {
+		t.Errorf("ik hints %v", got.HelpHints)
+	}
+	// Without a table the whole cache-type list gives no Found and no Absent.
+	none := writeEncodingFixture(t, t.TempDir(), "llama-server", lits("hy_v4"))
+	got = ProbeBackendEncodings(none, mainlineKVHelp, names)
+	if len(got.Found) != 0 || got.Complete {
+		t.Fatalf("help without a table: %+v", got)
+	}
+	for _, n := range names {
+		if got.Absent(n) {
+			t.Errorf("Absent(%q) from help alone", n)
+		}
+	}
+}
+
+// Absent answers only for names that were asked about, and only after the type
+// table was read in full.
+func TestAbsentNeedsAskedNamesAndTheTable(t *testing.T) {
+	table := writeEncodingFixture(t, t.TempDir(), "llama-server", []byte(mainlineTable))
+	got := ProbeBackendEncodings(table, "", []string{"Q4_K", "STQ1_0"})
+	if !got.Complete || !got.Absent("STQ1_0") || !got.Absent("stq1_0") {
+		t.Fatalf("asked, table read: %+v", got)
+	}
+	for _, other := range []string{"TQ1_0", "NO_SUCH_TYPE_XYZ", "", "q4_0"} {
+		if got.Absent(other) {
+			t.Errorf("Absent(%q) is true for a name that was not asked about", other)
+		}
+	}
+	if got.Absent("Q4_K") {
+		t.Error("a found name is not absent")
+	}
+	// Everything asked about is in the help text: the old "all found in help"
+	// completeness is gone, nothing is known about any name.
+	all := ProbeBackendEncodings("", mainlineKVHelp, []string{"F16", "Q8_0"})
+	if all.Complete || all.TableSeen || all.Absent("F16") || all.Absent("Q8_0") || all.Absent("STQ1_0") {
+		t.Fatalf("help-only completeness: %+v", all)
+	}
+	// A zero value probes nothing and answers nothing.
+	var zero EncodingProbe
+	if zero.Absent("Q4_K") {
+		t.Error("zero probe answered")
+	}
+	// Table seen but the file cut short: not Complete, so not Absent.
+	blob := append(append([]byte(mainlineTable), bytes.Repeat([]byte{'x'}, 8000)...), 0)
+	bin := writeEncodingFixture(t, t.TempDir(), "llama-server", blob)
+	cut := probeBackendEncodings(bin, "", []string{"STQ1_0"}, int64(len(mainlineTable)+4500), 1<<20, 48)
+	if !cut.TableSeen || cut.Complete || cut.Absent("STQ1_0") {
+		t.Fatalf("cut short: %+v", cut)
 	}
 }
