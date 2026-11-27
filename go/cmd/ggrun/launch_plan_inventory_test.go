@@ -54,14 +54,16 @@ type inventoryTestHost struct {
 	detect, list   int
 	used, free     int
 	residentCalled int
+	nanoCapable    bool
+	nano           int
 }
 
 // install replaces the live readers for the rest of t.
 func (h *inventoryTestHost) install(t *testing.T) {
 	t.Helper()
-	savedUsed, savedFree, savedResident := runtimeVRAMUsedMB, fitDriverFreeVRAM, residentReviewerVRAM
+	savedUsed, savedFree, savedResident, savedNano := runtimeVRAMUsedMB, fitDriverFreeVRAM, residentReviewerVRAM, claudeNanoGPUCapable
 	t.Cleanup(func() {
-		runtimeVRAMUsedMB, fitDriverFreeVRAM, residentReviewerVRAM = savedUsed, savedFree, savedResident
+		runtimeVRAMUsedMB, fitDriverFreeVRAM, residentReviewerVRAM, claudeNanoGPUCapable = savedUsed, savedFree, savedResident, savedNano
 	})
 	runtimeVRAMUsedMB = func(int) int {
 		h.used++
@@ -86,6 +88,13 @@ func (h *inventoryTestHost) install(t *testing.T) {
 			t.Error("an inventory plan scanned this host for a resident reviewer")
 		}
 		return h.residentMB
+	}
+	claudeNanoGPUCapable = func(string) bool {
+		h.nano++
+		if h.fatal {
+			t.Error("an inventory plan ran the Nano reviewer backend to list devices")
+		}
+		return h.nanoCapable
 	}
 }
 
@@ -275,6 +284,36 @@ func TestInventoryPlanDerivesLiveReadingsFromTheInventory(t *testing.T) {
 		})
 	})
 
+	t.Run("nano-reviewer", func(t *testing.T) {
+		launchOrderRunCase(t, launchOrderCase{goldenPlanCase: goldenPlanCase{name: "gpu24/dense-small/claude-reviewer-nanbeige"}}, func(t *testing.T) {
+			// The Nano artifact and its reviewed backend are installed; this
+			// host's reviewer backend lists no CUDA device.
+			savedReady, savedBackend := claudeNanoArtifactReady, claudeNanoBackend
+			claudeNanoArtifactReady = func(string) bool { return true }
+			claudeNanoBackend = func() (string, error) { return "/usr/bin/ggrun-golden-nano-llama-server", nil }
+			t.Cleanup(func() { claudeNanoArtifactReady, claudeNanoBackend = savedReady, savedBackend })
+			host := &inventoryTestHost{inventory: goldenPlanInventories["gpu24"]}
+			host.install(t)
+			reviewer := func(withInventory bool) string {
+				req, model := inventoryTestFixture(t, goldenPlanInventories["gpu24"], "dense-small", "--claude-code", "--claude-reviewer", "nanbeige")
+				if !withInventory {
+					req.InventoryPath = ""
+				}
+				p, planErr := planLaunch(req, host.inputs(t, "nano", model, goldenPlanBackend(t, "")))
+				if planErr != nil || p == nil || p.Req.ReviewerReservation == nil {
+					t.Fatalf("plan %+v, error %+v; want a plan with a reviewer seat", p, planErr)
+				}
+				return p.Req.ReviewerReservation.Name
+			}
+			if got := reviewer(true); got != claudeNanoCompanionName || host.nano != 0 {
+				t.Fatalf("inventory plan seats %q after %d device listings, want %q from the inventory's GPUs and none", got, host.nano, claudeNanoCompanionName)
+			}
+			if got := reviewer(false); got == claudeNanoCompanionName || host.nano == 0 {
+				t.Fatalf("host plan seats %q after %d device listings; the host's listing must decide", got, host.nano)
+			}
+		})
+	})
+
 	t.Run("vulkan-order", func(t *testing.T) {
 		launchOrderRunCase(t, launchOrderCase{goldenPlanCase: goldenPlanCase{name: "vulkan/mixed3/dense-small"}}, func(t *testing.T) {
 			// This host's backend enumerates the 24 GB card first.
@@ -318,14 +357,14 @@ func TestInventoryPlanDerivesLiveReadingsFromTheInventory(t *testing.T) {
 func TestInventoryPlanRestoresTheLiveReaders(t *testing.T) {
 	launchOrderTestEnv(t)
 	launchOrderRunCase(t, launchOrderCase{goldenPlanCase: goldenPlanCase{name: "gpu12/dense-small/restore"}}, func(t *testing.T) {
-		host := &inventoryTestHost{inventory: goldenPlanInventories["gpu12"], residentMB: 7}
+		host := &inventoryTestHost{inventory: goldenPlanInventories["gpu12"], residentMB: 7, nanoCapable: true}
 		host.install(t)
 		check := func(step string) {
 			t.Helper()
 			before := *host
 			runtimeVRAMUsedMB(0)
 			fitDriverFreeVRAM(&detect.Capabilities{GPUs: []detect.GPU{{Index: 0}}})
-			if residentReviewerVRAM("marker") != 7 || host.used != before.used+1 || host.free != before.free+1 || host.residentCalled != before.residentCalled+1 {
+			if residentReviewerVRAM("marker") != 7 || !claudeNanoGPUCapable("backend") || host.used != before.used+1 || host.free != before.free+1 || host.residentCalled != before.residentCalled+1 || host.nano != before.nano+1 {
 				t.Fatalf("%s: the live readers are not the ones installed before the plan", step)
 			}
 		}

@@ -158,8 +158,8 @@ type launchPlan struct {
 // the rest of an inventory plan and returns the function that puts the
 // previous readers back; planLaunch defers it, so every return and a panic
 // restore them. The readers are package variables (test seams) read by
-// runtimeGPUCapabilitiesForLaunch, bindFitToGuard and
-// claudeReviewerReservation, which the launch shares; swapping them here keeps
+// runtimeGPUCapabilitiesForLaunch, bindFitToGuard, claudeReviewerReservation
+// and resolveClaudeCompanionProfile, which the launch shares; swapping them here keeps
 // those bodies and the launch untouched. Not safe beside goroutines that call
 // the readers concurrently: planning starts none that outlive it, and nothing
 // plans concurrently with a dry run in one process.
@@ -169,9 +169,12 @@ type launchPlan struct {
 //   - driver free VRAM: total - used of the inventory card, what a driver on
 //     that machine would report (ggrun's own vram_reserved_mb is withheld by
 //     the planner, not by the driver);
-//   - resident reviewer: none; an inventory cannot describe running processes.
+//   - resident reviewer: none; an inventory cannot describe running processes;
+//   - Nano reviewer GPU check (--claude-reviewer nanbeige; it runs the reviewer
+//     backend with --list-devices): capable when the inventory lists a GPU,
+//     which plans the opt-in's larger seat.
 func useInventoryReadings(inv *detect.Capabilities, req *launchRequest) (restore func()) {
-	savedUsed, savedFree, savedResident := runtimeVRAMUsedMB, fitDriverFreeVRAM, residentReviewerVRAM
+	savedUsed, savedFree, savedResident, savedNano := runtimeVRAMUsedMB, fitDriverFreeVRAM, residentReviewerVRAM, claudeNanoGPUCapable
 	byIndex := map[int]detect.GPU{}
 	if inv != nil {
 		for _, g := range inv.GPUs {
@@ -193,8 +196,9 @@ func useInventoryReadings(inv *detect.Capabilities, req *launchRequest) (restore
 		return free
 	}
 	residentReviewerVRAM = func(string) int { return 0 }
+	claudeNanoGPUCapable = func(string) bool { return inv != nil && len(inv.GPUs) > 0 }
 	return func() {
-		runtimeVRAMUsedMB, fitDriverFreeVRAM, residentReviewerVRAM = savedUsed, savedFree, savedResident
+		runtimeVRAMUsedMB, fitDriverFreeVRAM, residentReviewerVRAM, claudeNanoGPUCapable = savedUsed, savedFree, savedResident, savedNano
 	}
 }
 

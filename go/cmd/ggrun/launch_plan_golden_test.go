@@ -617,7 +617,7 @@ func TestGoldenPlanSyntheticMatrix(t *testing.T) {
 // stubs were dropped.
 func goldenPlanFailLiveReaders(t *testing.T) {
 	t.Helper()
-	restoreUsed, restoreFree, restoreResident := runtimeVRAMUsedMB, fitDriverFreeVRAM, residentReviewerVRAM
+	restoreUsed, restoreFree, restoreResident, restoreNano := runtimeVRAMUsedMB, fitDriverFreeVRAM, residentReviewerVRAM, claudeNanoGPUCapable
 	runtimeVRAMUsedMB = func(int) int {
 		t.Error("an inventory plan read this host's used VRAM")
 		return 0
@@ -630,8 +630,12 @@ func goldenPlanFailLiveReaders(t *testing.T) {
 		t.Error("an inventory plan scanned this host for a resident reviewer")
 		return 0
 	}
+	claudeNanoGPUCapable = func(string) bool {
+		t.Error("an inventory plan ran the Nano reviewer backend to list devices")
+		return false
+	}
 	t.Cleanup(func() {
-		runtimeVRAMUsedMB, fitDriverFreeVRAM, residentReviewerVRAM = restoreUsed, restoreFree, restoreResident
+		runtimeVRAMUsedMB, fitDriverFreeVRAM, residentReviewerVRAM, claudeNanoGPUCapable = restoreUsed, restoreFree, restoreResident, restoreNano
 	})
 }
 
