@@ -8441,80 +8441,24 @@ func cmdDryRun(args []string) {
 		fmt.Fprintln(os.Stderr, "Usage: ggrun dry-run <model.gguf>")
 		os.Exit(2)
 	}
-	if w := exposedHostWarning(req.Host, req.Port, req.ExtraArgs, os.Getenv); w != "" {
-		fmt.Fprintln(os.Stderr, w)
-	}
 
-	caps, err := detect.Detect()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error detecting hardware: %v\n", err)
-		os.Exit(1)
+	// planLaunch prints nothing itself; its notes print here as they happen.
+	plan, planErr := planLaunch(req, dryRunPlanInputs(printPlanNote))
+	if planErr != nil {
+		printPlanNote(planErr.note())
+		os.Exit(planErr.Code)
 	}
-	// A dry-run may plan for a DIFFERENT machine, or for this one while another
-	// process holds its VRAM. Planning-only: real launches refuse the flag
-	// outright (see loadInventory), because exact-argv admission and observed
-	// allocations are the authority for what actually fits.
-	if req.InventoryPath != "" {
-		caps, err = loadInventory(req.InventoryPath)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error reading inventory: %v\n", err)
-			os.Exit(2)
-		}
-	}
-
-	cfg := loadConfigOrExit()
-	req.ModelPath = resolveModelPath(req.ModelPath, cfg.ModelDir)
-
-	model, err := parseModel(req.ModelPath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error parsing model: %v\n", err)
-		os.Exit(1)
-	}
-	warnModelCompatibility(model)
-
-	be := resolveLaunchBackend(req, model, caps)
-	if be == nil {
-		fmt.Fprintf(os.Stderr, "Error: %s\n", backendUnavailableMessage(req))
-		os.Exit(1)
-	}
-	applyCachedBackendCapabilities(req, cfg.CacheDir, model, be)
-	// Match cmdLaunch exactly: Claude Auto's helper consumes VRAM before the
-	// main model is packed. Without this reservation a dry-run can claim one
-	// additional expert layer fits and disagree with the real launch.
-	applyRememberedClaudeSelfClassify(req, cfg.CacheDir, model, caps, os.Stderr)
-	req.ReviewerReservation = claudeReviewerReservation(req, caps, cfg.CacheDir)
-
-	placementOpts := placementOptionsFromRequest(req, model, be, cfg.CacheDir)
-	strategy, err := placement.Compute(caps, model, placementOpts)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error computing placement: %s\n", placementErrorMessage(err))
-		os.Exit(1)
-	}
-	claudeCodeSlotAdjust(strategy, model, req.ClaudeCode, req.ParallelSet, req.BatchSizeSet, req.UBatchSizeSet)
-	strategy = applyCalibrationDecision(req, cfg, model, be, caps, strategy)
-	strategy = explainServingOptimization(req, cfg, model, be, caps, strategy, true)
-
-	if os.Getenv("GGRUN_TRACE_PLACEMENT") != "" {
-		printVRAMLedger(strategy)
-		fmt.Printf("[trace] NCPUMoE=%d OT=%s\n", strategy.NCPUMoE, strategy.OTString)
-	}
-	if refusal := dryRunFitRefusal(strategy); refusal != "" {
+	strategy, be, serverArgs, envPrefix := plan.Strategy, plan.Backend, plan.ServerArgv, plan.EnvPrefix
+	if plan.Refusal != nil {
 		if !req.EmitServerArgvJSON {
 			printOptimizationSummary("dry-run", strategy, true)
 		}
-		fmt.Fprintln(os.Stderr, refusal)
-		os.Exit(1)
+		printPlanNote(plan.Refusal.note())
+		os.Exit(plan.Refusal.Code)
 	}
 
-	serverArgs := buildLaunchServerArgs(req, cfg, be, caps, model, strategy)
-	envPrefix := applyGPUVisibility(req, backendDialect(be))
-	if vkEnv, vkErr := vulkanDeviceOrderEnv(req, be, caps, listVulkanDevices); vkErr != nil {
-		fmt.Fprintf(os.Stderr, "[dry-run] warning: could not align Vulkan device order with detected GPUs: %v\n", vkErr)
-	} else if vkEnv != "" {
-		envPrefix = vkEnv
-	}
 	if req.EmitServerArgvJSON {
-		plan := struct {
+		planJSON := struct {
 			Schema               string                          `json:"schema"`
 			ModelPath            string                          `json:"model_path"`
 			BackendTag           string                          `json:"backend_tag"`
@@ -8530,17 +8474,14 @@ func cmdDryRun(args []string) {
 			OptimizationBoundary *placement.OptimizationBoundary `json:"optimization_boundary,omitempty"`
 			CachedOptimization   *placement.CalibrationDecision  `json:"cached_optimization,omitempty"`
 		}{
-			Schema:        "ggrun-server-plan-v1",
-			ModelPath:     req.ModelPath,
-			BackendTag:    be.Tag,
-			BackendID:     be.Identity,
-			ClaudeProfile: effectiveClaudeProfile(req),
-			// The name a crash log would be filed under. Exposed because it is a
-			// hash: when recovery silently fails to find a previous OOM, the only
-			// way to see why is to compare this between two runs.
-			LaunchScope:          claudeLaunchLogScope(req, model, be, serverArgs),
-			MemoryMaxMB:          backendMemoryMaxMB(req, caps),
-			Environment:          launchPlanEnvironment(serverArgs, envPrefix, be.Path),
+			Schema:               "ggrun-server-plan-v1",
+			ModelPath:            req.ModelPath,
+			BackendTag:           be.Tag,
+			BackendID:            be.Identity,
+			ClaudeProfile:        effectiveClaudeProfile(req),
+			LaunchScope:          plan.LaunchScope,
+			MemoryMaxMB:          plan.MemoryMaxMB,
+			Environment:          plan.Environment,
 			ServerArgv:           serverArgs,
 			Residency:            strategy.Residency,
 			Bottleneck:           strategy.OptimizationBottleneck,
@@ -8548,14 +8489,14 @@ func cmdDryRun(args []string) {
 			OptimizationBoundary: strategy.OptimizationBoundary,
 			CachedOptimization:   req.AppliedCalibration,
 		}
-		if err := json.NewEncoder(os.Stdout).Encode(plan); err != nil {
+		if err := json.NewEncoder(os.Stdout).Encode(planJSON); err != nil {
 			fmt.Fprintf(os.Stderr, "Error writing launch plan: %v\n", err)
 			os.Exit(1)
 		}
 		return
 	}
 	printOptimizationSummary("dry-run", strategy, true)
-	printLearnedReserves("dry-run", cfg.CacheDir, caps)
+	printLearnedReserves("dry-run", plan.Config.CacheDir, plan.Caps)
 	printBackendBuild("dry-run", be)
 	var displayEnv []string
 	if envPrefix != "" {

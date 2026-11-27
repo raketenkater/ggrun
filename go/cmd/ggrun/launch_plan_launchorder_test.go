@@ -217,16 +217,55 @@ func launchOrderReplay(t *testing.T, c launchOrderCase, launch bool, prepare lau
 		run.record.Outcome, run.record.Error = "parse-error", err.Error()
 		return run
 	}
-	caps, err := loadInventory(req.InventoryPath)
-	if err != nil {
-		t.Fatalf("%s: inventory: %v", c.name, err)
-	}
 	cfg, err := config.Load()
 	if err != nil {
 		t.Fatalf("%s: config: %v", c.name, err)
 	}
 	if cfg.CacheDir != cacheDir {
 		t.Fatalf("%s: cache dir %q, want the case's own %q", c.name, cfg.CacheDir, cacheDir)
+	}
+	be := goldenPlanBackend(t, c.backend)
+	run.be = be
+
+	if !launch {
+		// planLaunch, as cmdDryRun calls it. prepare seeds the cache where the
+		// dry run has the model and the hardware and no backend yet.
+		beforeBackend := func(req *launchRequest, m *placement.ModelProfile, caps *detect.Capabilities) {
+			if prepare != nil {
+				prepare(t, cacheDir, req, m, caps)
+			}
+			run.req, run.model, run.caps = req, m, caps
+		}
+		plan, planErr := planLaunch(req, goldenPlanInputs(t, c.name, model, be, beforeBackend))
+		if planErr != nil {
+			if !goldenPlanIsPlacementError(planErr) {
+				t.Fatalf("%s: %s", c.name, planErr.Message)
+			}
+			run.record.Outcome, run.record.Error = "placement-error", planErr.Err.Error()
+			return run
+		}
+		// The first plan is the calibrated strategy. explainServingOptimization
+		// keeps candidate zero (the same strategy) and sets only its ledger,
+		// estimate, bottleneck, residency and boundary, none of which the
+		// fingerprint reads; buildLaunchServerArgs re-runs NormalizeBatchSizes,
+		// which placement already applied. A change there shows up as a
+		// first-plan divergence.
+		run.firstPlan = launchOrderFingerprint(plan.Strategy, req)
+		run.strategy = plan.Strategy
+		if plan.Refusal != nil {
+			run.record.Outcome, run.record.Error = "fit-refusal", plan.Refusal.Message
+			return run
+		}
+		run.record.Outcome = "plan"
+		run.record.Plan = goldenPlanJSONOf(plan)
+		run.record.Strategy = launchOrderProjection(plan.Strategy, req)
+		return run
+	}
+
+	// Launch order: cmdLaunch's steps, replayed by hand.
+	caps, err := loadInventory(req.InventoryPath)
+	if err != nil {
+		t.Fatalf("%s: inventory: %v", c.name, err)
 	}
 	req.ModelPath = resolveModelPath(req.ModelPath, cfg.ModelDir)
 	warnModelCompatibility(model)
@@ -242,38 +281,7 @@ func launchOrderReplay(t *testing.T, c launchOrderCase, launch bool, prepare lau
 	var strategy *placement.Strategy
 	var serverArgs []string
 	var envPrefix string
-	be := goldenPlanBackend(t, c.backend)
-	run.be = be
-
-	if !launch {
-		normalizeArchKVRequest(req, model)
-		applyBackendFeatureCompatibility(req, model, be)
-		preflightBackendArch(model, be, caps, req.AppHome)
-		applyCachedBackendCapabilities(req, cfg.CacheDir, model, be)
-		applyRememberedClaudeSelfClassify(req, cfg.CacheDir, model, caps, io.Discard)
-		req.ReviewerReservation = claudeReviewerReservation(req, caps, cfg.CacheDir)
-		strategy, err = placement.Compute(caps, model, placementOptionsFromRequest(req, model, be, cfg.CacheDir))
-		if err != nil {
-			run.record.Outcome, run.record.Error = "placement-error", err.Error()
-			return run
-		}
-		claudeCodeSlotAdjust(strategy, model, req.ClaudeCode, req.ParallelSet, req.BatchSizeSet, req.UBatchSizeSet)
-		strategy = applyCalibrationDecision(req, cfg, model, be, caps, strategy)
-		run.firstPlan = launchOrderFingerprint(strategy, req)
-		strategy = explainServingOptimization(req, cfg, model, be, caps, strategy, true)
-		run.strategy = strategy
-		if refusal := dryRunFitRefusal(strategy); refusal != "" {
-			run.record.Outcome, run.record.Error = "fit-refusal", refusal
-			return run
-		}
-		serverArgs = buildLaunchServerArgs(req, cfg, be, caps, model, strategy)
-		envPrefix = applyGPUVisibility(req, backendDialect(be))
-		if vkEnv, vkErr := vulkanDeviceOrderEnv(req, be, caps, noVulkan); vkErr != nil {
-			t.Fatalf("%s: vulkan device order: %v", c.name, vkErr)
-		} else if vkEnv != "" {
-			envPrefix = vkEnv
-		}
-	} else {
+	{
 		req.ProfilePolicyIdentity = requestedLaunchPolicyIdentity(req, model)
 		if err := validateRequestedGPUs(caps, req); err != nil {
 			run.steps = append(run.steps, "validate-gpus")
