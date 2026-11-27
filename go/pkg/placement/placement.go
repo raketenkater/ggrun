@@ -292,8 +292,9 @@ type Strategy struct {
 	MMProjPath        string       `json:"mmproj_path,omitempty"` // vision projector GGUF
 	MMProjSizeMB      int          `json:"-"`                     // mmproj VRAM on primary GPU
 	// CompanionPlacements records where each Options.Companions reservation was
-	// placed: GPU index, or -1 for CPU. Runtime-only; the launcher starts the
-	// helper on the device the planner chose.
+	// placed: physical GPU index (also under a --gpus restriction), or -1 for
+	// CPU. Runtime-only; the launcher starts the helper on the device the
+	// planner chose.
 	CompanionPlacements []CompanionPlacement `json:"-"`
 }
 
@@ -1642,7 +1643,10 @@ func computeResolvedStrategyCore(caps *detect.Capabilities, model *ModelProfile,
 	if model != nil && model.SparseLookupBytes > 0 && opts.sparseLookupPolicy == "" {
 		return nil, fmt.Errorf("sparse lookup tier policy unresolved; plan through Compute")
 	}
-	caps, err = restrictGPUs(caps, opts.GPUs)
+	// runtimeToPhysical is nil when nothing is restricted; under --gpus the
+	// planner works in the renumbered runtime view the backend enumerates.
+	var runtimeToPhysical map[int]int
+	caps, runtimeToPhysical, err = restrictGPUsWithPhysical(caps, opts.GPUs)
 	if err != nil {
 		return nil, err
 	}
@@ -1657,12 +1661,19 @@ func computeResolvedStrategyCore(caps *detect.Capabilities, model *ModelProfile,
 	// late annotation. Seat them before KV placement, batch selection, draft
 	// selection, plan-free snapshots, caches, or weight packing so every one of
 	// those decisions sees the same effective inventory.
+	// A companion's GPUPreference names physical cards; the ledger here is the
+	// runtime view, so the preference is mapped in and the seat mapped back out.
 	var companionPlacements []CompanionPlacement
 	if len(opts.Companions) > 0 {
-		caps, companionPlacements, err = applyCompanionReservations(caps, opts.Companions)
+		companions, seatErr := companionsOnRuntimeGPUs(opts.Companions, runtimeToPhysical)
+		if seatErr != nil {
+			return nil, seatErr
+		}
+		caps, companionPlacements, err = applyCompanionReservations(caps, companions)
 		if err != nil {
 			return nil, err
 		}
+		companionPlacements = companionSeatsOnPhysicalGPUs(companionPlacements, runtimeToPhysical)
 	}
 
 	// Load any KV cache size llama.cpp measured for this model on a prior launch,
@@ -1960,11 +1971,14 @@ func computeResolvedStrategyCore(caps *detect.Capabilities, model *ModelProfile,
 	if draftReservation, ok := speculativeCompanionReservation(s.Draft); ok {
 		var draftPlacements []CompanionPlacement
 		var compErr error
+		// DraftGPU is a runtime index (it names --device-draft), so the draft
+		// is seated in the runtime view; its reported seat is physical like
+		// every other CompanionPlacement.
 		caps, draftPlacements, compErr = applyCompanionReservations(caps, []CompanionReservation{draftReservation})
 		if compErr != nil {
 			return nil, compErr
 		}
-		s.CompanionPlacements = append(s.CompanionPlacements, draftPlacements...)
+		s.CompanionPlacements = append(s.CompanionPlacements, companionSeatsOnPhysicalGPUs(draftPlacements, runtimeToPhysical)...)
 	}
 	// The stale-plan guard and support output describe the exact post-companion
 	// inventory the target placement is about to consume.
@@ -2372,8 +2386,16 @@ func placementCachePathForSpecMode(path, mode string) string {
 // CUDA_VISIBLE_DEVICES / GGML_VK_VISIBLE_DEVICES, so the backend enumerates
 // only the selected devices starting at index 0.
 func restrictGPUs(caps *detect.Capabilities, want []int) (*detect.Capabilities, error) {
+	restricted, _, err := restrictGPUsWithPhysical(caps, want)
+	return restricted, err
+}
+
+// restrictGPUsWithPhysical is restrictGPUs plus the physical device index of
+// each renumbered runtime index. The map is nil when nothing is restricted, so
+// callers can tell "identity" from "renumbered".
+func restrictGPUsWithPhysical(caps *detect.Capabilities, want []int) (*detect.Capabilities, map[int]int, error) {
 	if caps == nil || len(want) == 0 || len(caps.GPUs) == 0 {
-		return caps, nil
+		return caps, nil, nil
 	}
 	wanted := make(map[int]bool, len(want))
 	for _, idx := range want {
@@ -2381,17 +2403,77 @@ func restrictGPUs(caps *detect.Capabilities, want []int) (*detect.Capabilities, 
 	}
 	filtered := *caps
 	filtered.GPUs = nil
+	runtimeToPhysical := make(map[int]int, len(want))
 	for _, g := range caps.GPUs {
 		if wanted[g.Index] {
 			gg := g
 			gg.Index = len(filtered.GPUs)
+			runtimeToPhysical[gg.Index] = g.Index
 			filtered.GPUs = append(filtered.GPUs, gg)
 		}
 	}
 	if len(filtered.GPUs) == 0 {
-		return nil, fmt.Errorf("--gpus %v matches no detected GPU (have %d GPUs)", want, len(caps.GPUs))
+		return nil, nil, fmt.Errorf("--gpus %v matches no detected GPU (have %d GPUs)", want, len(caps.GPUs))
 	}
-	return &filtered, nil
+	return &filtered, runtimeToPhysical, nil
+}
+
+// companionsOnRuntimeGPUs maps each companion's physical GPUPreference into the
+// runtime numbering of a --gpus restriction. A preferred card outside the
+// selection is dropped. A preference that names no selected card is never
+// widened to the planner's own choice: the companion is seated on the CPU when
+// it allows that, and otherwise the plan fails naming the companion. The input
+// is not modified; nil runtimeToPhysical (no restriction) returns it as is.
+func companionsOnRuntimeGPUs(comps []CompanionReservation, runtimeToPhysical map[int]int) ([]CompanionReservation, error) {
+	if runtimeToPhysical == nil {
+		return comps, nil
+	}
+	physicalToRuntime := make(map[int]int, len(runtimeToPhysical))
+	for visible, physical := range runtimeToPhysical {
+		physicalToRuntime[physical] = visible
+	}
+	out := make([]CompanionReservation, len(comps))
+	for i, comp := range comps {
+		out[i] = comp
+		if len(comp.GPUPreference) == 0 {
+			continue
+		}
+		preference := make([]int, 0, len(comp.GPUPreference))
+		for _, physical := range comp.GPUPreference {
+			if visible, ok := physicalToRuntime[physical]; ok {
+				preference = append(preference, visible)
+			}
+		}
+		if len(preference) == 0 {
+			if comp.VRAMMB > 0 && !comp.AllowCPU {
+				name := comp.Name
+				if name == "" {
+					name = "companion"
+				}
+				return nil, fmt.Errorf("companion %s needs %d MB VRAM but no GPU has room: none of its preferred GPUs %v is in the --gpus selection",
+					name, comp.VRAMMB, comp.GPUPreference)
+			}
+			// -1 matches no device, so chooseCompanionGPU seats it on the CPU.
+			preference = []int{-1}
+		}
+		out[i].GPUPreference = preference
+	}
+	return out, nil
+}
+
+// companionSeatsOnPhysicalGPUs turns runtime-view seats back into physical
+// device indexes, the unit CompanionPlacement.GPU documents and the launcher
+// uses to start the helper and to charge its seat. CPU seats (-1) stay -1.
+func companionSeatsOnPhysicalGPUs(seats []CompanionPlacement, runtimeToPhysical map[int]int) []CompanionPlacement {
+	if runtimeToPhysical == nil {
+		return seats
+	}
+	for i := range seats {
+		if physical, ok := runtimeToPhysical[seats[i].GPU]; ok && seats[i].GPU >= 0 {
+			seats[i].GPU = physical
+		}
+	}
+	return seats
 }
 
 // chooseStrategy selects the placement strategy from hardware and model size.

@@ -2115,6 +2115,57 @@ func physicalGPUIndex(visible int, visibleToPhysical map[int]int) int {
 	return visible
 }
 
+// visibleGPUForPhysical is the backend-visible index of a physical GPU under
+// req's --gpus selection: identity without one, -1 for an unselected card. It
+// numbers the sorted selection the way runtimeGPUCapabilities and
+// applyGPUVisibility do (the launch has already rejected missing indexes).
+func visibleGPUForPhysical(req *launchRequest, physical int) int {
+	if req == nil || strings.TrimSpace(req.GPUsFlag) == "" {
+		return physical
+	}
+	indices, err := parseGPUIndices(req.GPUsFlag)
+	if err != nil || len(indices) == 0 {
+		return physical
+	}
+	for visible, idx := range indices {
+		if idx == physical {
+			return visible
+		}
+	}
+	return -1
+}
+
+// companionVRAMByVisibleGPU is each seated companion's measured VRAM keyed by
+// the backend-visible index the post-launch probe reads (runtimeCaps), while a
+// CompanionPlacement names the physical card.
+func companionVRAMByVisibleGPU(req *launchRequest, cacheDir string, strategy *placement.Strategy) map[int]int {
+	companionVRAMByGPU := map[int]int{}
+	if strategy == nil {
+		return companionVRAMByGPU
+	}
+	for _, cp := range strategy.CompanionPlacements {
+		if cp.GPU < 0 {
+			continue
+		}
+		visible := visibleGPUForPhysical(req, cp.GPU)
+		if visible < 0 {
+			continue
+		}
+		// The NanoBeige worker stores its measured VRAM under its KV-qualified
+		// MeasurementKey (claude_auto.go companionMeasurementKey/recordReviewerVRAM),
+		// not its public Name; the strategy only carries Name. Resolve the key via
+		// the frozen profile so the netting lookup finds the file the writer wrote.
+		key := cp.Name
+		if req != nil && req.ReviewerProfile != nil && cp.Name == req.ReviewerProfile.Name {
+			key = req.ReviewerProfile.companionMeasurementKey()
+		}
+		if mb := placement.MeasuredCompanionVRAMMB(cacheDir, key); mb > 0 {
+			companionVRAMByGPU[visible] += mb
+		}
+	}
+	return companionVRAMByGPU
+}
+
 func resolveModelPath(path, modelDir string) string {
 	if path == "" || filepath.IsAbs(path) {
 		return path
@@ -4748,23 +4799,7 @@ func recordMeasuredLaunchProbes(req *launchRequest, cfg *config.Config, model *p
 		// out of the breakdown table's unaccounted column. Without this the
 		// reviewer/worker seated on a card shows up as permanent CUDA overhead
 		// and latches there (the 2916 MiB bug).
-		companionVRAMByGPU := map[int]int{}
-		for _, cp := range strategy.CompanionPlacements {
-			if cp.GPU < 0 {
-				continue
-			}
-			// The NanoBeige worker stores its measured VRAM under its KV-qualified
-			// MeasurementKey (claude_auto.go companionMeasurementKey/recordReviewerVRAM),
-			// not its public Name; the strategy only carries Name. Resolve the key via
-			// the frozen profile so the netting lookup finds the file the writer wrote.
-			key := cp.Name
-			if req != nil && req.ReviewerProfile != nil && cp.Name == req.ReviewerProfile.Name {
-				key = req.ReviewerProfile.companionMeasurementKey()
-			}
-			if mb := placement.MeasuredCompanionVRAMMB(cfg.CacheDir, key); mb > 0 {
-				companionVRAMByGPU[cp.GPU] += mb
-			}
-		}
+		companionVRAMByGPU := companionVRAMByVisibleGPU(req, cfg.CacheDir, strategy)
 		placement.RunPostLaunchProbe(cfg.CacheDir, gpus, serverLog, serverPID, companionVRAMByGPU, oracleTotals, false)
 		placement.RunPostLaunchModelProbeVRAMDelta(cfg.CacheDir, model, strategy, cacheBackendTag, gpus, baselineVRAMByGPU)
 	}
