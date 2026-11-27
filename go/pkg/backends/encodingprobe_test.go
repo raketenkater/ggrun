@@ -49,7 +49,7 @@ func TestEncodingsInHelpMatchesWholeWordsIgnoringCase(t *testing.T) {
 // embedded in a binary hold names too; only a whole NUL-bracketed literal
 // counts, in the case the catalog spells.
 func TestScanEncodingLiteralsNeedsWholeLiterals(t *testing.T) {
-	decoys := lits("STQ1_0", "Q1_0_G128", "q1_0", "/home/build/Q1_0/ggml.c", "xQ1_0", "Q1_0x")
+	decoys := lits("STQ1_0", "Q1_0_G128", "q1_0_g128", "/home/build/Q1_0/ggml.c", "xQ1_0", "Q1_0x", "stq1_0x")
 	got, _, complete, err := scanEncodingLiterals(bytes.NewReader(decoys), []string{"Q1_0", "STQ1_0"}, 5, 0)
 	if err != nil || !complete {
 		t.Fatalf("complete=%v err=%v", complete, err)
@@ -60,6 +60,16 @@ func TestScanEncodingLiteralsNeedsWholeLiterals(t *testing.T) {
 	withIt := lits("STQ1_0", "Q1_0_G128", "Q1_0")
 	got, _, _, err = scanEncodingLiterals(bytes.NewReader(withIt), []string{"Q1_0", "STQ1_0", "Q2_0"}, 5, 0)
 	if err != nil || !reflect.DeepEqual(got, []string{"Q1_0", "STQ1_0"}) {
+		t.Fatalf("found %v err %v", got, err)
+	}
+}
+
+// ggml spells type names in lower case; a catalog name matches either spelling,
+// and is reported as the caller wrote it.
+func TestScanEncodingLiteralsMatchesLowerCaseSpelling(t *testing.T) {
+	blob := lits("q8_0", "stq1_0")
+	got, _, _, err := scanEncodingLiterals(bytes.NewReader(blob), []string{"STQ1_0", "Q8_0", "q4_0"}, 5, 0)
+	if err != nil || !reflect.DeepEqual(got, []string{"Q8_0", "STQ1_0"}) {
 		t.Fatalf("found %v err %v", got, err)
 	}
 }
@@ -133,12 +143,77 @@ func TestProbeBackendEncodingsReadsTheGgmlLibraryBesideTheBinary(t *testing.T) {
 		t.Fatal("every file was read in full, so absence is evidence")
 	}
 
-	// The binary itself counts (a static build), and help text counts.
-	static := writeEncodingFixture(t, t.TempDir(), "llama-server", lits("STQ1_0", "Q1_0"))
+	// The binary itself counts (a static build), and help text counts. Its type
+	// table is shown to be there by the canary literal every table carries.
+	static := writeEncodingFixture(t, t.TempDir(), "llama-server", lits("f16", "STQ1_0", "Q1_0"))
 	got = ProbeBackendEncodings(static, "allowed: q8_0", []string{"Q8_0", "STQ1_0", "Q1_0", "ZZZ_9"})
 	want := map[string]string{"Q8_0": "help", "STQ1_0": "llama-server", "Q1_0": "llama-server"}
 	if !reflect.DeepEqual(got.Found, want) || !got.Complete {
 		t.Fatalf("static build: %+v, want %v", got, want)
+	}
+}
+
+// A binary read in full is no proof of absence when the type table was not
+// among the files read (a system install: libraries not located), unless the
+// canary literal shows it was; a ggml library read in full is enough. A name
+// spelled in lower case in the table is found.
+func TestProbeBackendEncodingsCompleteNeedsTheTypeTable(t *testing.T) {
+	noTable := writeEncodingFixture(t, t.TempDir(), "llama-server", lits("hy_v4", "q8_0"))
+	got := ProbeBackendEncodings(noTable, "", []string{"STQ1_0"})
+	if len(got.Found) != 0 || got.Complete {
+		t.Fatalf("no ggml library and no canary: %+v", got)
+	}
+	withCanary := writeEncodingFixture(t, t.TempDir(), "llama-server", lits("hy_v4", "f16"))
+	got = ProbeBackendEncodings(withCanary, "", []string{"STQ1_0"})
+	if len(got.Found) != 0 || !got.Complete {
+		t.Fatalf("canary present, name absent: %+v", got)
+	}
+	dir := t.TempDir()
+	bin := writeEncodingFixture(t, dir, "llama-server", lits("hy_v4"))
+	writeEncodingFixture(t, dir, "libggml-base.so", lits("q8_0", "stq1_0"))
+	got = ProbeBackendEncodings(bin, "", []string{"STQ1_0", "ZZZ_9"})
+	if !reflect.DeepEqual(got.Found, map[string]string{"STQ1_0": "libggml-base.so"}) || !got.Complete {
+		t.Fatalf("lower-case spelling in a ggml library: %+v", got)
+	}
+	// A ggml library that could not be read in full leaves it open.
+	dir = t.TempDir()
+	bin = writeEncodingFixture(t, dir, "llama-server", lits("hy_v4"))
+	lib := writeEncodingFixture(t, dir, "libggml-base.so", lits("q8_0"))
+	if err := os.Chmod(lib, 0); err == nil {
+		if f, openErr := os.Open(lib); openErr != nil { // not readable (not root, not Windows)
+			got = ProbeBackendEncodings(bin, "", []string{"STQ1_0"})
+			if got.Complete {
+				t.Fatalf("unreadable ggml library: %+v", got)
+			}
+		} else {
+			f.Close()
+		}
+	}
+}
+
+// Once the byte budget is spent no further file is read, and absence proves
+// nothing: a literal in a file past the budget is not found.
+func TestProbeBackendEncodingsStopsAtTheByteBudget(t *testing.T) {
+	dir := t.TempDir()
+	filler := bytes.Repeat([]byte{'x'}, 60)
+	bin := writeEncodingFixture(t, dir, "llama-server", filler)
+	writeEncodingFixture(t, dir, "libggml-a.so", filler)
+	writeEncodingFixture(t, dir, "libggml-b.so", filler)
+	writeEncodingFixture(t, dir, "libggml-c.so", lits("STQ1_0"))
+	// 150 bytes: the binary takes 60, libggml-a 60, libggml-b gets 30, libggml-c nothing.
+	got := probeBackendEncodings(bin, "", []string{"STQ1_0"}, 100, 150, 48)
+	if len(got.Found) != 0 || got.Complete {
+		t.Fatalf("budget spent: %+v", got)
+	}
+	// With room for everything the literal is found.
+	got = probeBackendEncodings(bin, "", []string{"STQ1_0"}, 100, 1000, 48)
+	if got.Found["STQ1_0"] != "libggml-c.so" || !got.Complete {
+		t.Fatalf("budget not spent: %+v", got)
+	}
+	// A cap on the file count leaves it open as well.
+	got = probeBackendEncodings(bin, "", []string{"ZZZ_9"}, 100, 1000, 2)
+	if got.Complete {
+		t.Fatalf("file cap: %+v", got)
 	}
 }
 

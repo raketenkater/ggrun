@@ -446,16 +446,34 @@ _I64_MAX = (1 << 63) - 1
 def _name_pattern(name):
     """A tensor name with every all-digit dot segment written '*', or None for
     a name that is empty or not printable ASCII."""
-    if not name or any(ord(c) < 0x20 or ord(c) > 0x7e for c in name):
+    if not name or not (name.isascii() and name.isprintable()):
         return None
-    return '.'.join('*' if s and all('0' <= c <= '9' for c in s) else s
-                    for s in name.split('.'))
+    # The name is ASCII here, so isdigit() is exactly 0-9 (and false for '').
+    return '.'.join('*' if seg.isdigit() else seg for seg in name.split('.'))
+
+
+# (bytes_per_block, elements_per_block) of the types whose layout is the same in
+# every backend; mirrors ggmlTypeSize in go/pkg/gguf/complete.go, which is
+# deliberately not GGUF_TYPE_SIZE above (that one also sizes ik_llama ids). A
+# tensor of one of these types in a smaller span than its layout needs means the
+# file is damaged or the id means something else; the Go reader then gives no
+# histogram, and so does this one.
+_LAYOUT_TYPES = {
+    0: (4, 1), 1: (2, 1),
+    2: (18, 32), 3: (20, 32), 6: (22, 32), 7: (24, 32), 8: (34, 32), 9: (36, 32),
+    10: (84, 256), 11: (110, 256), 12: (144, 256), 13: (176, 256), 14: (210, 256), 15: (292, 256),
+    16: (66, 256), 17: (74, 256), 18: (98, 256), 19: (50, 256), 20: (18, 32),
+    21: (110, 256), 22: (82, 256), 23: (136, 256),
+    24: (1, 1), 25: (2, 1), 26: (4, 1), 27: (8, 1), 28: (8, 1),
+    29: (56, 256), 30: (2, 1), 39: (17, 32),
+}
 
 
 def _row_spans(rows, header_end, file_size, align):
     """On-disk span of each non-empty row (by position), or None when the
     offsets are unusable: no data section, a first offset that is not 0, equal
-    or overlapping offsets, data past the end of the file."""
+    or overlapping offsets, data past the end of the file, a span smaller than its type's
+    layout."""
     live = [i for i, row in enumerate(rows) if row[2] > 0]
     spans = {}
     if not live:
@@ -474,6 +492,9 @@ def _row_spans(rows, header_end, file_size, align):
         if off >= data_size or end > data_size or end <= off:
             return None
         spans[i] = end - off
+        layout = _LAYOUT_TYPES.get(rows[i][1])
+        if layout and spans[i] < (rows[i][2] + layout[1] - 1) // layout[1] * layout[0]:
+            return None
     return spans
 
 
@@ -545,6 +566,9 @@ def parse(path: str) -> Dict[str, Any]:
     def read_shard(sp: str, meta: Dict[str, Any]) -> None:
         with open(sp, 'rb') as f:
             if f.read(4) != b'GGUF':
+                # A zero-filled or foreign shard: its tensors are unknown, so
+                # the histogram of the others would read as the whole model.
+                r['_types_bad'] = True
                 return
             f.read(4)  # version
             tensor_count = struct.unpack('<Q', f.read(8))[0]

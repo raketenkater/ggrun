@@ -120,6 +120,29 @@ type Info struct {
 	TensorTypes []TypeUsage `json:"tensor_types,omitempty"`
 }
 
+// UnmarshalJSON decodes the helper's output. The optional tensor_types field is
+// decoded on its own: one of a shape this build does not know (an old or foreign
+// helper) leaves TensorTypes nil, which means "unknown", instead of failing the
+// whole parse and the launch with it.
+func (i *Info) UnmarshalJSON(data []byte) error {
+	type plain Info
+	aux := struct {
+		*plain
+		TensorTypes json.RawMessage `json:"tensor_types"`
+	}{plain: (*plain)(i)}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	i.TensorTypes = nil
+	if len(aux.TensorTypes) > 0 {
+		var types []TypeUsage
+		if json.Unmarshal(aux.TensorTypes, &types) == nil {
+			i.TensorTypes = types
+		}
+	}
+	return nil
+}
+
 // Parse calls the bundled GGUF metadata helper.
 // parseHelperTimeout bounds parse_gguf.py; tests shorten it.
 var parseHelperTimeout = boundexec.HelperTimeout

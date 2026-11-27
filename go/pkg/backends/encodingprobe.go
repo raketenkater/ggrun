@@ -18,17 +18,29 @@ import (
 // caller that already runs --help.
 //
 // Matching mirrors the architecture probe where it matters:
-//   - in a binary a name counts only as a whole NUL-bracketed literal, case as
-//     written: "Q1_0" is a substring of "STQ1_0" and a prefix of "Q1_0_G128",
-//     and build paths embedded in a binary contain names too;
+//   - in a binary a name counts only as a whole NUL-bracketed literal, either
+//     as written or in lower case (ggml spells type_name in lower case, "q8_0"):
+//     "q1_0" is a substring of "stq1_0" and a prefix of "q1_0_g128", and build
+//     paths embedded in a binary contain names too;
 //   - in help text it counts as a whole word (letters, digits and underscore
 //     delimit), ignoring case, since help text is prose.
+//
+// A catalog entry's encoding name is therefore the type_name literal of the
+// backend's own type table, usually lower case.
+//
+// What a hit means: the literal is in the type table, so the backend knows the
+// name; it does not prove the GPU backends have kernels for it, and a help hit
+// may only be the KV-cache type list. What absence means: see EncodingProbe.Complete.
 
 const (
 	encodingScanChunk    = 4 << 20
 	encodingMaxFileBytes = 256 << 20 // read per file
 	encodingMaxTotal     = 1 << 30   // read per backend
 	encodingMaxFiles     = 48
+
+	// encodingCanary is a literal every ggml type table carries (F16's
+	// type_name). Finding it shows the table was among the bytes read.
+	encodingCanary = "f16"
 )
 
 // EncodingProbe is what a backend build is known to carry.
@@ -36,9 +48,14 @@ type EncodingProbe struct {
 	// Found maps each requested name (as the caller spelled it) that was found
 	// to the source that carries it: "help" or a file's base name.
 	Found map[string]string
-	// Complete is true when every requested name was found or every file of the
-	// build was read in full. When false, a name missing from Found proves
-	// nothing: a file was unreadable, over the read bounds, or no build was given.
+	// Complete is true when every requested name was found, or when every file
+	// of the build was read in full and the type table was among them: a file
+	// whose name contains "ggml" was read in full, or the canary literal "f16"
+	// (in every type table) was found. Only then does a name missing from Found
+	// mean the backend lacks it. When false it proves nothing: a file was
+	// unreadable or over the read bounds, no build was given, or the libraries
+	// holding the type table were not located (a system install without RUNPATH
+	// gives the binary alone).
 	Complete bool
 }
 
@@ -89,13 +106,18 @@ func uniqueEncodingNames(names []string) []string {
 // returns the names found, the bytes read, and whether the source was read to
 // its end (or every name was found first).
 func scanEncodingLiterals(r io.Reader, names []string, chunk int, limit int64) (found []string, read int64, complete bool, err error) {
-	remaining := map[string][]byte{}
+	remaining := map[string][][]byte{}
 	overlap := 0
 	for _, name := range uniqueEncodingNames(names) {
-		needle := append(append([]byte{0}, name...), 0)
-		remaining[name] = needle
-		if len(needle)-1 > overlap {
-			overlap = len(needle) - 1
+		variants := [][]byte{encodingNeedle(name)}
+		if lower := strings.ToLower(name); lower != name {
+			variants = append(variants, encodingNeedle(lower))
+		}
+		remaining[name] = variants
+		for _, v := range variants {
+			if len(v)-1 > overlap {
+				overlap = len(v) - 1
+			}
 		}
 	}
 	if chunk < 1 {
@@ -119,10 +141,13 @@ func scanEncodingLiterals(r io.Reader, names []string, chunk int, limit int64) (
 		if n > 0 {
 			idle = 0
 			window := append(append(make([]byte, 0, len(carry)+n), carry...), buf[:n]...)
-			for name, needle := range remaining {
-				if bytes.Contains(window, needle) {
-					found = append(found, name)
-					delete(remaining, name)
+			for name, variants := range remaining {
+				for _, needle := range variants {
+					if bytes.Contains(window, needle) {
+						found = append(found, name)
+						delete(remaining, name)
+						break
+					}
 				}
 			}
 			if len(window) > overlap {
@@ -146,6 +171,11 @@ func scanEncodingLiterals(r io.Reader, names []string, chunk int, limit int64) (
 	}
 	sort.Strings(found)
 	return found, read, true, nil
+}
+
+// encodingNeedle is a name as a whole NUL-bracketed C literal.
+func encodingNeedle(name string) []byte {
+	return append(append([]byte{0}, name...), 0)
 }
 
 // encodingProbeFiles is the binary, the llama libraries it loads (the
@@ -192,6 +222,12 @@ func encodingProbeFiles(binaryPath string) []string {
 // whose library closure is read within fixed bounds (encodingMax*). It is a
 // pure function of those inputs: it executes nothing and caches nothing.
 func ProbeBackendEncodings(binaryPath, help string, names []string) EncodingProbe {
+	return probeBackendEncodings(binaryPath, help, names, encodingMaxFileBytes, encodingMaxTotal, encodingMaxFiles)
+}
+
+// probeBackendEncodings is ProbeBackendEncodings with its read bounds as
+// parameters, so tests can use small ones.
+func probeBackendEncodings(binaryPath, help string, names []string, maxFileBytes, maxTotal int64, maxFiles int) EncodingProbe {
 	probe := EncodingProbe{Found: map[string]string{}}
 	names = uniqueEncodingNames(names)
 	if len(names) == 0 {
@@ -215,42 +251,59 @@ func ProbeBackendEncodings(binaryPath, help string, names []string) EncodingProb
 		return probe
 	}
 	files := encodingProbeFiles(binaryPath)
-	complete := len(files) <= encodingMaxFiles
-	if !complete {
-		files = files[:encodingMaxFiles]
+	allRead := len(files) <= maxFiles
+	if !allRead {
+		files = files[:maxFiles]
 	}
-	budget := int64(encodingMaxTotal)
+	budget := maxTotal
+	tableSeen := false // a ggml library was read in full, or the canary was found
 	for _, f := range files {
 		if len(remaining) == 0 {
 			break
 		}
-		limit := int64(encodingMaxFileBytes)
+		if budget <= 0 {
+			allRead = false
+			break
+		}
+		limit := maxFileBytes
 		if budget < limit {
 			limit = budget
 		}
-		found, read, ok, err := scanEncodingFile(f, remaining, limit)
+		scanNames := append([]string{}, remaining...)
+		if !containsString(scanNames, encodingCanary) {
+			scanNames = append(scanNames, encodingCanary)
+		}
+		found, read, ok, err := scanEncodingFile(f, scanNames, limit)
 		budget -= read
 		if err != nil || !ok {
-			complete = false
+			allRead = false
+		} else if strings.Contains(strings.ToLower(filepath.Base(f)), "ggml") {
+			tableSeen = true
+		}
+		if containsString(found, encodingCanary) {
+			tableSeen = true
 		}
 		var left []string
 		for _, n := range remaining {
-			hit := false
-			for _, g := range found {
-				if g == n {
-					hit = true
-					probe.Found[n] = filepath.Base(f)
-					break
-				}
-			}
-			if !hit {
+			if containsString(found, n) {
+				probe.Found[n] = filepath.Base(f)
+			} else {
 				left = append(left, n)
 			}
 		}
 		remaining = left
 	}
-	probe.Complete = complete || len(remaining) == 0
+	probe.Complete = len(remaining) == 0 || (allRead && tableSeen)
 	return probe
+}
+
+func containsString(list []string, s string) bool {
+	for _, x := range list {
+		if x == s {
+			return true
+		}
+	}
+	return false
 }
 
 func scanEncodingFile(path string, names []string, limit int64) ([]string, int64, bool, error) {

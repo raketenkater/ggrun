@@ -475,18 +475,24 @@ def test_type_histogram_merges_shards():
         build(os.path.join(d, 'm-00002-of-00002.gguf'), arch='llama', real_spans=True,
               tensor=['blk.1.attn_q.weight:256,32:8:8704', 'blk.1.ffn_up_exps.weight:256,64:42:4608'])
         types = _types(parse(first))
+        # A zero-filled shard 2 (a preallocated, interrupted download): the
+        # histogram of shard 1 alone must not stand for the model.
+        with open(os.path.join(d, 'm-00002-of-00002.gguf'), 'wb') as fh:
+            fh.write(b'\0' * 4096)
+        zeroed = parse(first)
         os.remove(os.path.join(d, 'm-00002-of-00002.gguf'))
         missing = parse(first)
     assert_eq(types[8]['tensors'], 2, 'tensors across shards')
     assert_eq(types[8]['bytes'], 2 * 8704, 'bytes across shards')
     assert_eq(types[42]['bytes'], 4608, 'second shard type')
     assert_eq(types[8]['names'], ['blk.*.attn_q.weight'], 'names merge')
+    assert 'tensor_types' not in zeroed, 'a zero-filled shard must give no histogram: %r' % zeroed
     assert 'tensor_types' not in missing, 'a missing shard must give no histogram: %r' % missing
     print('  ok type_histogram_merges_shards')
 
 
 def test_type_histogram_is_absent_when_offsets_cannot_be_trusted():
-    spec = ['blk.%d.attn_q.weight:256,32:8:64' % i for i in range(4)]
+    spec = ['blk.%d.attn_q.weight:256,32:99:64' % i for i in range(4)]
     with tempfile.TemporaryDirectory() as d:
         # The default synthetic file has every tensor at offset 0 and no data.
         plain = os.path.join(d, 'plain.gguf')
@@ -495,7 +501,7 @@ def test_type_histogram_is_absent_when_offsets_cannot_be_trusted():
 
         good = os.path.join(d, 'good.gguf')
         build(good, arch='llama', real_spans=True, tensor=spec)
-        assert_eq(_types(parse(good))[8]['tensors'], 4, 'good file')
+        assert_eq(_types(parse(good))[99]['tensors'], 4, 'good file')
         blob = open(good, 'rb').read()
         # Cut inside the last table entry: the table is truncated.
         cut_table = os.path.join(d, 'cut_table.gguf')
@@ -508,6 +514,19 @@ def test_type_histogram_is_absent_when_offsets_cannot_be_trusted():
             fh.write(blob[:len(blob) - 100])
         assert 'tensor_types' not in parse(cut_data), 'interrupted download'
     print('  ok type_histogram_is_absent_when_offsets_cannot_be_trusted')
+
+
+def test_type_histogram_is_absent_when_a_span_is_smaller_than_the_type_layout():
+    """Q8_0 over 256x32 needs 8704 bytes; a 4000-byte span means a damaged file
+    or another encoding, and the Go reader reports no histogram for it too."""
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, 'short.gguf')
+        build(path, arch='llama', real_spans=True, tensor=['blk.0.attn_q.weight:256,32:8:4000'])
+        assert 'tensor_types' not in parse(path), 'span smaller than the layout'
+        ok = os.path.join(d, 'ok.gguf')
+        build(ok, arch='llama', real_spans=True, tensor=['blk.0.attn_q.weight:256,32:8:8704'])
+        assert_eq(_types(parse(ok))[8]['bytes'], 8704, 'span equal to the layout')
+    print('  ok type_histogram_is_absent_when_a_span_is_smaller_than_the_type_layout')
 
 
 def test_type_histogram_bounds_name_patterns():
@@ -547,6 +566,7 @@ def main():
     test_type_histogram_colliding_id_differs_by_bytes()
     test_type_histogram_merges_shards()
     test_type_histogram_is_absent_when_offsets_cannot_be_trusted()
+    test_type_histogram_is_absent_when_a_span_is_smaller_than_the_type_layout()
     test_type_histogram_bounds_name_patterns()
     print('All tests passed.')
 

@@ -78,8 +78,8 @@ func TestResolveRequirementTable(t *testing.T) {
 			if !strings.Contains(got.Reason, tc.reason) {
 				t.Errorf("reason %q does not mention %q", got.Reason, tc.reason)
 			}
-			if got.None() != (tc.family == "" && tc.recipe == "") {
-				t.Errorf("None() = %v for family %q recipe %q", got.None(), tc.family, tc.recipe)
+			if got.None() != (tc.family == "" && tc.recipe == "" && len(tc.unchecked) == 0) {
+				t.Errorf("None() = %v for family %q recipe %q unchecked %v", got.None(), tc.family, tc.recipe, tc.unchecked)
 			}
 		})
 	}

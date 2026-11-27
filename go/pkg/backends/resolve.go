@@ -8,7 +8,14 @@ import (
 	"github.com/raketenkater/ggrun/pkg/gguf"
 )
 
-// Requirement is what the catalog says a model needs from a backend.
+// Requirement is what the catalog says a model needs from a backend. It has
+// three states:
+//   - requires something: Family is set or Recipe is non-nil;
+//   - none needed: Family is empty, Recipe is nil and Unchecked is empty;
+//   - unknown: Unchecked is non-empty, because a tensor-type entry for the
+//     architecture could not be checked without the model's type histogram.
+//
+// Family and Recipe may both be set when the model needs both.
 type Requirement struct {
 	// Family is the generic backend family a name rule requires for the
 	// architecture ("" when none); it is exactly RequiredBackendForArch.
@@ -19,15 +26,15 @@ type Requirement struct {
 	Recipe *Recipe
 	// Unchecked names catalog entries for the architecture that require tensor
 	// encodings which could not be checked because the model's type histogram
-	// is unknown. A caller must not read an empty Requirement as "none needed"
-	// while this is non-empty.
+	// is unknown.
 	Unchecked []string
 	// Reason says which rule matched, or why nothing did.
 	Reason string
 }
 
-// None reports whether the catalog states no special requirement.
-func (r Requirement) None() bool { return r.Family == "" && r.Recipe == nil }
+// None reports that nothing is required and nothing is unknown. It is false
+// while Unchecked is non-empty: an unchecked rule is not "no requirement".
+func (r Requirement) None() bool { return r.Family == "" && r.Recipe == nil && len(r.Unchecked) == 0 }
 
 // ResolveRequirement applies the catalog to a model's architecture and tensor
 // type histogram (gguf.Info.TensorTypes or gguf.ReadTypeHistogramModel; nil

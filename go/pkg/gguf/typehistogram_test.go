@@ -2,6 +2,7 @@ package gguf
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -192,6 +193,28 @@ func TestTypeHistogramGoAndHelperAgree(t *testing.T) {
 		}
 	}
 
+	// A zero-filled second shard (a preallocated, interrupted download) and a
+	// span smaller than the type's layout give no histogram in either reader.
+	zdir := t.TempDir()
+	zfirst := filepath.Join(zdir, "z-00001-of-00002.gguf")
+	writeProfileFile(t, zfirst, profileFile(nil, []profileTensor{{"blk.0.attn_q.weight", []uint64{256, 32}, 8}}, nil))
+	writeProfileFile(t, filepath.Join(zdir, "z-00002-of-00002.gguf"), make([]byte, 4096))
+	short := filepath.Join(zdir, "short.gguf")
+	writeProfileFile(t, short, profileFile(nil, []profileTensor{{"blk.0.attn_q.weight", []uint64{256, 32}, 8}},
+		map[string]uint64{"blk.0.attn_q.weight": 4000}))
+	for _, path := range []string{zfirst, short} {
+		if types, err := ReadTypeHistogramModel(path); err == nil {
+			t.Errorf("%s: Go reader gave a histogram: %+v", filepath.Base(path), types)
+		}
+		info, err := Parse(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(info.TensorTypes) != 0 {
+			t.Errorf("%s: helper gave a histogram: %+v", filepath.Base(path), info.TensorTypes)
+		}
+	}
+
 	// A file whose offsets cannot be trusted has no histogram in either reader.
 	partial := filepath.Join(dir, "partial.gguf")
 	data := histogramFixture()
@@ -205,5 +228,37 @@ func TestTypeHistogramGoAndHelperAgree(t *testing.T) {
 	}
 	if len(info.TensorTypes) != 0 {
 		t.Errorf("helper gave a histogram for an interrupted download: %+v", info.TensorTypes)
+	}
+}
+
+// A tensor_types field of a shape this build does not know must not fail the
+// parse: the histogram is optional and absent means unknown.
+func TestInfoIgnoresTensorTypesOfUnknownShape(t *testing.T) {
+	for _, field := range []string{`5`, `"x"`, `[{"type":"q8_0","tensors":1}]`, `[{"type":4294967296}]`, `{"type":8}`, `null`} {
+		var info Info
+		if err := json.Unmarshal([]byte(`{"arch":"llama","layers":3,"tensor_types":`+field+`}`), &info); err != nil {
+			t.Errorf("tensor_types %s failed the parse: %v", field, err)
+			continue
+		}
+		if info.Architecture != "llama" || info.BlockCount != 3 || info.TensorTypes != nil {
+			t.Errorf("tensor_types %s: %+v", field, info)
+		}
+	}
+	var good Info
+	if err := json.Unmarshal([]byte(`{"arch":"llama","tensor_types":[{"type":44,"tensors":58,"elements":9,"bytes":7,"names":["a"]}]}`), &good); err != nil {
+		t.Fatal(err)
+	}
+	want := []TypeUsage{{Type: 44, Tensors: 58, Elements: 9, Bytes: 7, Names: []string{"a"}}}
+	if !reflect.DeepEqual(good.TensorTypes, want) {
+		t.Fatalf("good shape: %+v", good.TensorTypes)
+	}
+	// A cached Info round-trips with its histogram.
+	data, err := json.Marshal(&good)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var again Info
+	if err := json.Unmarshal(data, &again); err != nil || !reflect.DeepEqual(again.TensorTypes, want) {
+		t.Fatalf("round trip: %+v %v", again.TensorTypes, err)
 	}
 }
