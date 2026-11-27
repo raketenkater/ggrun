@@ -31,7 +31,7 @@ ggrun model.gguf --kv-quality q5_1
 ggrun model.gguf --kv-placement gpu
 
 # Core launch optimization
-ggrun model.gguf --calibrate auto   # default: bounded search on a cold scope, direct reuse afterward
+ggrun model.gguf --calibrate auto   # default: bounded speed search on a new scope; an unchanged launch reuses the saved config
 ggrun model.gguf --calibrate on     # wider explicit screen; its result stays explicit-only
 ggrun model.gguf --calibrate off    # serve the stable planner estimate without performance search
 
@@ -104,6 +104,19 @@ K and V must currently use the same type. ggrun rejects a mixed pair instead
 of producing a placement plan with the wrong KV-memory estimate.
 
 ## Core standard-launch optimization
+
+`--calibrate` is a speed search over the planner's plan: it compares nearby
+launch shapes of the same model on a short agent workload and keeps the faster
+one only if it passes the launch checks. It does not choose the model or the
+quant, and it is not what makes a plan fit; admission does that. An unchanged
+launch reuses the saved verified config. When the model, backend, GPUs, free
+memory the config was verified against, or another scope input changes, ggrun
+plans again and may measure again.
+
+`--no-cached-config` ignores saved plans for one launch (the placement cache,
+verified configs and the cached measurements they use) and saves no verified
+config. It deletes nothing, so it is not a reset: the next launch without it
+uses the saved data again.
 
 ggrun's placement planner computes where a model's weights, experts, KV cache,
 and runtime graph live from the GGUF and measured memory — but more than one
