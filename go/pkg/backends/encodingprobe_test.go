@@ -108,7 +108,7 @@ type zeroReader struct{}
 
 func (zeroReader) Read([]byte) (int, error) { return 0, nil }
 
-func writeProbeFile(t *testing.T, dir, name string, data []byte) string {
+func writeEncodingFixture(t *testing.T, dir, name string, data []byte) string {
 	t.Helper()
 	p := filepath.Join(dir, name)
 	if err := os.WriteFile(p, data, 0o644); err != nil {
@@ -119,10 +119,10 @@ func writeProbeFile(t *testing.T, dir, name string, data []byte) string {
 
 func TestProbeBackendEncodingsReadsTheGgmlLibraryBesideTheBinary(t *testing.T) {
 	dir := t.TempDir()
-	bin := writeProbeFile(t, dir, "llama-server", lits("hy_v4", "/build/Q1_0/x"))
-	writeProbeFile(t, dir, "libggml-base.so.0", lits("q8_0", "STQ1_0", "Q1_0_G128"))
-	writeProbeFile(t, dir, "ggml-cuda.dll", lits("Q4_0_CUDA"))
-	writeProbeFile(t, dir, "notes.txt", lits("ZZZ_9")) // not a library: never read
+	bin := writeEncodingFixture(t, dir, "llama-server", lits("hy_v4", "/build/Q1_0/x"))
+	writeEncodingFixture(t, dir, "libggml-base.so.0", lits("q8_0", "STQ1_0", "Q1_0_G128"))
+	writeEncodingFixture(t, dir, "ggml-cuda.dll", lits("Q4_0_CUDA"))
+	writeEncodingFixture(t, dir, "notes.txt", lits("ZZZ_9")) // not a library: never read
 	names := []string{"STQ1_0", "Q1_0", "ZZZ_9"}
 
 	got := ProbeBackendEncodings(bin, "", names)
@@ -134,7 +134,7 @@ func TestProbeBackendEncodingsReadsTheGgmlLibraryBesideTheBinary(t *testing.T) {
 	}
 
 	// The binary itself counts (a static build), and help text counts.
-	static := writeProbeFile(t, t.TempDir(), "llama-server", lits("STQ1_0", "Q1_0"))
+	static := writeEncodingFixture(t, t.TempDir(), "llama-server", lits("STQ1_0", "Q1_0"))
 	got = ProbeBackendEncodings(static, "allowed: q8_0", []string{"Q8_0", "STQ1_0", "Q1_0", "ZZZ_9"})
 	want := map[string]string{"Q8_0": "help", "STQ1_0": "llama-server", "Q1_0": "llama-server"}
 	if !reflect.DeepEqual(got.Found, want) || !got.Complete {
