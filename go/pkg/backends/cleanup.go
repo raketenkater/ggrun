@@ -114,8 +114,8 @@ func relUnder(root, p string) (string, bool) {
 	return rel, true
 }
 
-// within reports whether p equals dir or lies inside it.
-func within(dir, p string) bool {
+// pathWithin reports whether p equals dir or lies inside it.
+func pathWithin(dir, p string) bool {
 	if samePath(dir, p) {
 		return true
 	}
@@ -190,7 +190,7 @@ func resolveUnderRoot(root, p string) (string, error) {
 		return "", err
 	}
 	if info.Mode()&os.ModeSymlink != 0 {
-		if !within(realRoot, realP) {
+		if !pathWithin(realRoot, realP) {
 			return "", fmt.Errorf("%w: %s is a symlink to %s (%w)", ErrSymlink, absP, realP, ErrOutsideRoot)
 		}
 		return "", fmt.Errorf("%w: %s is a symlink to %s", ErrSymlink, absP, realP)
@@ -199,7 +199,7 @@ func resolveUnderRoot(root, p string) (string, error) {
 		return "", fmt.Errorf("%s is not a directory", absP)
 	}
 	if !samePath(realP, filepath.Join(realRoot, rel)) {
-		if !within(realRoot, realP) {
+		if !pathWithin(realRoot, realP) {
 			return "", fmt.Errorf("%w: %s resolves to %s (%w)", ErrSymlink, absP, realP, ErrOutsideRoot)
 		}
 		return "", fmt.Errorf("%w: %s resolves to %s", ErrSymlink, absP, realP)
@@ -263,7 +263,7 @@ func linksInto(appHome, tree string) []string {
 		}
 		target = filepath.Clean(target)
 		for _, d := range dirs {
-			if within(d, target) {
+			if pathWithin(d, target) {
 				out = append(out, link)
 				break
 			}
@@ -327,7 +327,7 @@ func (env CleanupEnv) runningFrom(dir string) ([]ProcInfo, error) {
 	}
 	var hit []ProcInfo
 	for _, p := range procs {
-		if (p.Exe != "" && within(dir, filepath.Clean(p.Exe))) || (p.Cwd != "" && within(dir, filepath.Clean(p.Cwd))) {
+		if (p.Exe != "" && pathWithin(dir, filepath.Clean(p.Exe))) || (p.Cwd != "" && pathWithin(dir, filepath.Clean(p.Cwd))) {
 			hit = append(hit, p)
 		}
 	}
