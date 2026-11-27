@@ -265,6 +265,30 @@ func TestCompanionSeatFailureIsClassifiedAndNeverConsultsAdvisor(t *testing.T) {
 	if strings.Contains(out.String(), "Support advisor") {
 		t.Fatalf("advisor prompt shown for a deterministic seat failure: %q", out.String())
 	}
+
+	// The final error names what the user can do, on both launch exits.
+	for _, prefix := range []string{"Error computing placement", "Error computing resident placement"} {
+		report := placementFailureReport(prefix, req, err)
+		if !strings.HasPrefix(report, prefix+": "+seatErr.Error()) ||
+			!strings.Contains(report, "\n[claude-code] ") || !strings.Contains(report, "--claude-reviewer off") ||
+			!strings.Contains(report, "--gpus selection with room") {
+			t.Fatalf("seat failure report lacks the cause or the reviewer hint:\n%s", report)
+		}
+	}
+	// No hint without a reviewer reservation, or for any other placement error.
+	noReviewer := *req
+	noReviewer.ReviewerReservation = nil
+	if report := placementFailureReport("Error computing placement", &noReviewer, seatErr); strings.Contains(report, "--claude-reviewer") {
+		t.Fatalf("reviewer hint without a reviewer reservation: %s", report)
+	}
+	for _, other := range []error{
+		errors.New("automatic context fit found no admissible plan between 4096 and 8192 tokens"),
+		errors.New("memory preflight failed: too tight"),
+	} {
+		if report := placementFailureReport("Error computing placement", req, other); strings.Contains(report, "--claude-reviewer") {
+			t.Fatalf("reviewer hint for a non-seat failure: %s", report)
+		}
+	}
 }
 
 // When a placement failure does reach the advisor gate, the user sees the
@@ -307,5 +331,15 @@ func TestPlacementErrorPrecedesAdvisorPrompt(t *testing.T) {
 		if cause < 0 || ask < 0 || cause > ask {
 			t.Fatalf("interactive=%v: cause at %d, advisor text at %d, want the cause first:\n%s", interactive, cause, ask, text)
 		}
+		// The launch's final line refers to the printed cause instead of
+		// repeating it.
+		report := placementFailureReport("Error computing placement", req, err)
+		if strings.Contains(report, novel.Error()) || !strings.Contains(report, "see the [placement] line above") {
+			t.Fatalf("interactive=%v: final error repeats or loses the cause: %s", interactive, report)
+		}
+	}
+	// A cause the advisor never printed is still reported in full.
+	if report := placementFailureReport("Error computing placement", req, novel); report != "Error computing placement: "+novel.Error() {
+		t.Fatalf("unshown cause reported as %q", report)
 	}
 }

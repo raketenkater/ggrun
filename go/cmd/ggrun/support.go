@@ -577,6 +577,39 @@ var placementAdvisorConsentIO = func() (io.Reader, io.Writer, bool) {
 	return os.Stdin, os.Stderr, stdinIsTerminal()
 }
 
+// placementCauseShown is a placement error escalatePlacementFailure already
+// printed before the advisor prompt; the launch's final error line refers to it
+// instead of repeating it. errors.Is/As still reach the original error.
+type placementCauseShown struct{ err error }
+
+func (e placementCauseShown) Error() string { return e.err.Error() }
+func (e placementCauseShown) Unwrap() error { return e.err }
+
+// claudeReviewerSeatHint names what a user can do when the separate Auto
+// reviewer has no GPU seat. Empty for every other failure.
+func claudeReviewerSeatHint(req *launchRequest, err error) string {
+	if req == nil || req.ReviewerReservation == nil || classifyAdvisorFailure(err) != "companion_seat_unavailable" {
+		return ""
+	}
+	return "[claude-code] the separate Claude Auto reviewer has no GPU seat; rerun with --claude-reviewer off " +
+		"(or GGRUN_CLAUDE_AUTO_REVIEWER=off) to route Auto reviews through the main model, or choose a --gpus selection with room for it"
+}
+
+// placementFailureReport is the final placement error line (prefix: the
+// launch stage) plus the reviewer-seat hint when it applies.
+func placementFailureReport(prefix string, req *launchRequest, err error) string {
+	msg := placementErrorMessage(err)
+	var shown placementCauseShown
+	if errors.As(err, &shown) {
+		msg = "see the [placement] line above" + strings.TrimPrefix(msg, err.Error())
+	}
+	report := prefix + ": " + msg
+	if hint := claudeReviewerSeatHint(req, err); hint != "" {
+		report += "\n" + hint
+	}
+	return report
+}
+
 // escalatePlacementFailure is the placement-side Layer-2/Layer-3 boundary, the
 // sibling of retryStartWithAdvisor for a placement (not backend-start) failure.
 // The caller has already run the Layer-1 deterministic replan
@@ -605,11 +638,11 @@ func escalatePlacementFailure(req *launchRequest, cfg *config.Config, model *pla
 	fmt.Fprintf(output, "[placement] %v\n", replanErr)
 	if consentErr := confirmAdvisorAction(plan, input, output, interactive); consentErr != nil {
 		fmt.Fprintf(output, "[support] %v\n", consentErr)
-		return nil, replanErr
+		return nil, placementCauseShown{replanErr}
 	}
 	decision, analyzed := maybeAnalyzeLaunchFailure(req, cfg, model, be, caps, nil, replanErr, "placement", escalation)
 	if !analyzed || !applyAdvisorDecision(req, model, nil, decision) {
-		return nil, replanErr
+		return nil, placementCauseShown{replanErr}
 	}
 	strategy, err := computeStrategy(req)
 	if err != nil {

@@ -7227,7 +7227,7 @@ func cmdLaunch(args []string) {
 				strategy, err = escalatePlacementFailure(req, cfg, model, be, caps, firstCode, replanErr, computeStrategy)
 			}
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error computing placement: %s\n", placementErrorMessage(err))
+				fmt.Fprintln(os.Stderr, placementFailureReport("Error computing placement", req, err))
 				os.Exit(1)
 			}
 		}
@@ -7250,7 +7250,7 @@ func cmdLaunch(args []string) {
 			strategy, err = tryResidentWithoutClaudeReviewer(req, err, os.Stdin, os.Stderr, stdinIsTerminal(), computeStrategy)
 		}
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error computing resident placement: %s\n", placementErrorMessage(err))
+			fmt.Fprintln(os.Stderr, placementFailureReport("Error computing resident placement", req, err))
 			os.Exit(1)
 		}
 	}
