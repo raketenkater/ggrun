@@ -142,7 +142,8 @@ func (env CleanupEnv) publishedCommits() map[string]bool {
 // LocalWork says what in a whole source tree might exist nowhere else, or ""
 // when nothing was detected and everything could be read. It looks only at files:
 // a stash ref; HEAD or a local branch at a commit that is neither a remote
-// branch tip nor a reviewed pin, tags included; files newer than the git index.
+// branch tip nor a reviewed pin; any tag not at such a commit (upstream tags
+// included, since the files cannot tell them apart); files newer than the git index.
 // It cannot see staged changes, or edits and untracked files older than the
 // last rewrite of the index, so "" means "none detected", not "none". A tree with
 // no readable .git, or that is a linked worktree, is "unknown". Recipe patches
@@ -171,7 +172,7 @@ func (env CleanupEnv) LocalWork(tree string) string {
 			published[sha] = true
 		}
 	}
-	var unpublished []string
+	var unpublished, tags []string
 	if b, err := os.ReadFile(filepath.Join(gitDir, "HEAD")); err != nil {
 		unknown = append(unknown, "HEAD unreadable")
 	} else if head := strings.TrimSpace(string(b)); strings.HasPrefix(head, "ref:") {
@@ -189,13 +190,26 @@ func (env CleanupEnv) LocalWork(tree string) string {
 		unknown = append(unknown, "HEAD unreadable")
 	}
 	for name, sha := range refs {
-		if (strings.HasPrefix(name, "refs/heads/") || strings.HasPrefix(name, "refs/tags/")) && !published[sha] {
+		if published[sha] {
+			continue
+		}
+		if strings.HasPrefix(name, "refs/heads/") {
 			unpublished = append(unpublished, name)
+		} else if strings.HasPrefix(name, "refs/tags/") {
+			tags = append(tags, name)
 		}
 	}
-	sort.Strings(unpublished)
-	if len(unpublished) > 0 {
-		found = append(found, "commits not on any remote branch or reviewed pin ("+strings.Join(uniqueSorted(unpublished), ", ")+")")
+	// HEAD and branches come first so a real local branch never hides behind
+	// a long tag list.
+	if names := uniqueSorted(unpublished); len(names) > 0 {
+		found = append(found, "commits not on any remote branch or reviewed pin ("+cappedList(names)+")")
+	}
+	// Tags still count. A clone packs upstream tags into packed-refs, a later
+	// fetch writes them loose, and git gc packs local tags too, so no file
+	// tells a fetched tag from one made here. An annotated tag is compared by
+	// its tag object, not the peeled commit, so it always counts.
+	if names := uniqueSorted(tags); len(names) > 0 {
+		found = append(found, fmt.Sprintf("%d tag(s) not at a remote branch tip or reviewed pin, which may exist only here; the git files cannot tell an upstream tag from a local one (%s)", len(names), cappedList(names)))
 	}
 	idx, err := os.Stat(filepath.Join(gitDir, "index"))
 	if err != nil {
@@ -239,7 +253,20 @@ func (env CleanupEnv) LocalWork(tree string) string {
 	return ""
 }
 
+// maxListedRefs caps how many ref names one local-work line lists.
+const maxListedRefs = 5
+
+// cappedList joins up to maxListedRefs names and counts the rest.
+func cappedList(names []string) string {
+	if len(names) <= maxListedRefs {
+		return strings.Join(names, ", ")
+	}
+	return fmt.Sprintf("%s and %d more", strings.Join(names[:maxListedRefs], ", "), len(names)-maxListedRefs)
+}
+
+// uniqueSorted sorts in and drops repeats.
 func uniqueSorted(in []string) []string {
+	sort.Strings(in)
 	var out []string
 	for i, s := range in {
 		if i == 0 || s != in[i-1] {
