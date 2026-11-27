@@ -571,6 +571,45 @@ func deterministicReplanOnPlacementFailure(req *launchRequest, model *placement.
 	return placement.Compute(caps, model, opts)
 }
 
+// placementAdvisorConsentIO is where escalatePlacementFailure shows the cause
+// and asks for consent; tests replace it to read what the user sees.
+var placementAdvisorConsentIO = func() (io.Reader, io.Writer, bool) {
+	return os.Stdin, os.Stderr, stdinIsTerminal()
+}
+
+// placementCauseShown is a placement error escalatePlacementFailure already
+// printed before the advisor prompt; the launch's final error line refers to it
+// instead of repeating it. errors.Is/As still reach the original error.
+type placementCauseShown struct{ err error }
+
+func (e placementCauseShown) Error() string { return e.err.Error() }
+func (e placementCauseShown) Unwrap() error { return e.err }
+
+// claudeReviewerSeatHint names what a user can do when the separate Auto
+// reviewer has no GPU seat. Empty for every other failure.
+func claudeReviewerSeatHint(req *launchRequest, err error) string {
+	if req == nil || req.ReviewerReservation == nil || classifyAdvisorFailure(err) != "companion_seat_unavailable" {
+		return ""
+	}
+	return "[claude-code] the separate Claude Auto reviewer has no GPU seat; rerun with --claude-reviewer off " +
+		"(or GGRUN_CLAUDE_AUTO_REVIEWER=off) to route Auto reviews through the main model, or choose a --gpus selection with room for it"
+}
+
+// placementFailureReport is the final placement error line (prefix: the
+// launch stage) plus the reviewer-seat hint when it applies.
+func placementFailureReport(prefix string, req *launchRequest, err error) string {
+	msg := placementErrorMessage(err)
+	var shown placementCauseShown
+	if errors.As(err, &shown) {
+		msg = "see the [placement] line above" + strings.TrimPrefix(msg, err.Error())
+	}
+	report := prefix + ": " + msg
+	if hint := claudeReviewerSeatHint(req, err); hint != "" {
+		report += "\n" + hint
+	}
+	return report
+}
+
 // escalatePlacementFailure is the placement-side Layer-2/Layer-3 boundary, the
 // sibling of retryStartWithAdvisor for a placement (not backend-start) failure.
 // The caller has already run the Layer-1 deterministic replan
@@ -593,13 +632,17 @@ func escalatePlacementFailure(req *launchRequest, cfg *config.Config, model *pla
 		return nil, replanErr
 	}
 	plan := advisorConsentPlanForEscalation(replanCode)
-	if consentErr := confirmAdvisorAction(plan, os.Stdin, os.Stderr, stdinIsTerminal()); consentErr != nil {
-		fmt.Fprintf(os.Stderr, "[support] %v\n", consentErr)
-		return nil, replanErr
+	input, output, interactive := placementAdvisorConsentIO()
+	// The user decides about the helper with the cause in front of them; the
+	// prompt alone only says "a novel launch failure".
+	fmt.Fprintf(output, "[placement] %v\n", replanErr)
+	if consentErr := confirmAdvisorAction(plan, input, output, interactive); consentErr != nil {
+		fmt.Fprintf(output, "[support] %v\n", consentErr)
+		return nil, placementCauseShown{replanErr}
 	}
 	decision, analyzed := maybeAnalyzeLaunchFailure(req, cfg, model, be, caps, nil, replanErr, "placement", escalation)
 	if !analyzed || !applyAdvisorDecision(req, model, nil, decision) {
-		return nil, replanErr
+		return nil, placementCauseShown{replanErr}
 	}
 	strategy, err := computeStrategy(req)
 	if err != nil {
@@ -735,6 +778,11 @@ func classifyAdvisorFailure(cause error) string {
 	switch {
 	case strings.Contains(message, "cuda") && strings.Contains(message, "out of memory"):
 		return "cuda_oom_after_deterministic_recovery"
+	// A companion (Auto reviewer, worker) is seated before the main model is
+	// packed (placement applyCompanionReservations), so no main-model reshape
+	// the advisor can propose frees its seat.
+	case strings.Contains(message, "companion ") && strings.Contains(message, "but no gpu has room"):
+		return "companion_seat_unavailable"
 	case strings.Contains(message, "model does not fit"):
 		return "model_does_not_fit"
 	case strings.Contains(message, "memory preflight"):
@@ -791,13 +839,14 @@ func classifyAdvisorFailure(cause error) string {
 // deterministicFailureCode reports whether a classified failure is owned by the
 // deterministic controller with NO advisor-reshapable action. The advisor can
 // only propose bounded placement reshaples; a port collision, a permission
-// boundary, a missing cgroup containment, or a flag the controller refuses to
-// change are environment/user-action problems that no reshape fixes. Escalating
+// boundary, a missing cgroup containment, a flag the controller refuses to
+// change, or a companion helper with no GPU seat are environment/user-action
+// problems that no reshape fixes. Escalating
 // them would spend a helper process and online research budget to re-derive the
 // same "no_action" — so the Layer-2 gate treats them as deterministic.
 func deterministicFailureCode(code string) bool {
 	switch code {
-	case "port_in_use", "permission_denied", "memory_cgroup_limit", "flag_rejected_no_fix":
+	case "port_in_use", "permission_denied", "memory_cgroup_limit", "flag_rejected_no_fix", "companion_seat_unavailable":
 		return true
 	default:
 		return false
