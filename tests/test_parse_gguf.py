@@ -425,6 +425,123 @@ def test_hostile_lengths_are_refused_without_huge_reads():
     print('  ✓ hostile_lengths_are_refused_without_huge_reads')
 
 
+def _types(r):
+    return {t['type']: t for t in r.get('tensor_types', [])}
+
+
+def test_type_histogram_counts_spans_and_names():
+    """Per type id: table entries (empty ones too), elements, bytes by on-disk
+    span and the distinct name patterns. Unknown ids are reported as numbers."""
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, 'hist.gguf')
+        build(path, arch='llama', layers=2, real_spans=True, tensor=[
+            'blk.0.attn_q.weight:256,32:8:8704',
+            'zero.weight:0,5:8:0',
+            'blk.1.attn_q.weight:256,32:8:8704',
+            'blk.0.ffn_up_exps.weight:256,32,2:99:4096',
+        ])
+        r = parse(path)
+    assert_eq(r['tensor_accounting_schema'], 3, 'accounting schema is unchanged')
+    assert_eq(r['tensor_types'], [
+        {'type': 8, 'tensors': 3, 'elements': 16384, 'bytes': 17408,
+         'names': ['blk.*.attn_q.weight', 'zero.weight']},
+        {'type': 99, 'tensors': 1, 'elements': 16384, 'bytes': 4096,
+         'names': ['blk.*.ffn_up_exps.weight']},
+    ], 'histogram')
+    print('  ok type_histogram_counts_spans_and_names')
+
+
+def test_type_histogram_colliding_id_differs_by_bytes():
+    """The same id with the same element count is a different encoding when the
+    spans differ: 2.25 and 1.3125 bits per weight here. Only spans tell them
+    apart, which is why the histogram is never keyed by a type-size table."""
+    with tempfile.TemporaryDirectory() as d:
+        seen = []
+        for nbytes in (4608, 2688):
+            path = os.path.join(d, 'c%d.gguf' % nbytes)
+            build(path, arch='llama', real_spans=True,
+                  tensor=['blk.0.ffn_down_exps.weight:256,64:42:%d' % nbytes])
+            seen.append(_types(parse(path))[42])
+    assert_eq(seen[0]['elements'], seen[1]['elements'], 'same element count')
+    assert_eq([t['bytes'] for t in seen], [4608, 2688], 'bytes differ for one id')
+    print('  ok type_histogram_colliding_id_differs_by_bytes')
+
+
+def test_type_histogram_merges_shards():
+    with tempfile.TemporaryDirectory() as d:
+        first = os.path.join(d, 'm-00001-of-00002.gguf')
+        build(first, arch='llama', layers=2, real_spans=True,
+              tensor=['blk.0.attn_q.weight:256,32:8:8704'])
+        build(os.path.join(d, 'm-00002-of-00002.gguf'), arch='llama', real_spans=True,
+              tensor=['blk.1.attn_q.weight:256,32:8:8704', 'blk.1.ffn_up_exps.weight:256,64:42:4608'])
+        types = _types(parse(first))
+        # A zero-filled shard 2 (a preallocated, interrupted download): the
+        # histogram of shard 1 alone must not stand for the model.
+        with open(os.path.join(d, 'm-00002-of-00002.gguf'), 'wb') as fh:
+            fh.write(b'\0' * 4096)
+        zeroed = parse(first)
+        os.remove(os.path.join(d, 'm-00002-of-00002.gguf'))
+        missing = parse(first)
+    assert_eq(types[8]['tensors'], 2, 'tensors across shards')
+    assert_eq(types[8]['bytes'], 2 * 8704, 'bytes across shards')
+    assert_eq(types[42]['bytes'], 4608, 'second shard type')
+    assert_eq(types[8]['names'], ['blk.*.attn_q.weight'], 'names merge')
+    assert 'tensor_types' not in zeroed, 'a zero-filled shard must give no histogram: %r' % zeroed
+    assert 'tensor_types' not in missing, 'a missing shard must give no histogram: %r' % missing
+    print('  ok type_histogram_merges_shards')
+
+
+def test_type_histogram_is_absent_when_offsets_cannot_be_trusted():
+    spec = ['blk.%d.attn_q.weight:256,32:99:64' % i for i in range(4)]
+    with tempfile.TemporaryDirectory() as d:
+        # The default synthetic file has every tensor at offset 0 and no data.
+        plain = os.path.join(d, 'plain.gguf')
+        build(plain, arch='llama', tensor=[s.rsplit(':', 1)[0] for s in spec])
+        assert 'tensor_types' not in parse(plain), 'zero-length synthetic data has no spans'
+
+        good = os.path.join(d, 'good.gguf')
+        build(good, arch='llama', real_spans=True, tensor=spec)
+        assert_eq(_types(parse(good))[99]['tensors'], 4, 'good file')
+        blob = open(good, 'rb').read()
+        # Cut inside the last table entry: the table is truncated.
+        cut_table = os.path.join(d, 'cut_table.gguf')
+        with open(cut_table, 'wb') as fh:
+            fh.write(blob[:len(blob) - 4 * 64 - 31 - 10])
+        assert 'tensor_types' not in parse(cut_table), 'truncated table'
+        # Cut into the data: the last tensor now starts past the end of the file.
+        cut_data = os.path.join(d, 'cut_data.gguf')
+        with open(cut_data, 'wb') as fh:
+            fh.write(blob[:len(blob) - 100])
+        assert 'tensor_types' not in parse(cut_data), 'interrupted download'
+    print('  ok type_histogram_is_absent_when_offsets_cannot_be_trusted')
+
+
+def test_type_histogram_is_absent_when_a_span_is_smaller_than_the_type_layout():
+    """Q8_0 over 256x32 needs 8704 bytes; a 4000-byte span means a damaged file
+    or another encoding, and the Go reader reports no histogram for it too."""
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, 'short.gguf')
+        build(path, arch='llama', real_spans=True, tensor=['blk.0.attn_q.weight:256,32:8:4000'])
+        assert 'tensor_types' not in parse(path), 'span smaller than the layout'
+        ok = os.path.join(d, 'ok.gguf')
+        build(ok, arch='llama', real_spans=True, tensor=['blk.0.attn_q.weight:256,32:8:8704'])
+        assert_eq(_types(parse(ok))[8]['bytes'], 8704, 'span equal to the layout')
+    print('  ok type_histogram_is_absent_when_a_span_is_smaller_than_the_type_layout')
+
+
+def test_type_histogram_bounds_name_patterns():
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, 'names.gguf')
+        build(path, arch='llama', real_spans=True,
+              tensor=['x%03d.weight:32:8:34' % i for i in range(130)])
+        t = _types(parse(path))[8]
+    assert_eq(t['tensors'], 130, 'every entry counted')
+    assert_eq(len(t['names']), 128, 'names are capped')
+    assert_eq(t['names'], sorted(t['names']), 'names are sorted')
+    assert_eq(t['names_truncated'], True, 'cap is reported')
+    print('  ok type_histogram_bounds_name_patterns')
+
+
 def main():
     print('parse_gguf.py regression tests:')
     test_dense_llama()
@@ -445,6 +562,12 @@ def main():
     test_lookup_metadata_on_an_architecture_without_adapter_stays_resident()
     test_synthetic_second_adapter_uses_its_own_metadata()
     test_hostile_lengths_are_refused_without_huge_reads()
+    test_type_histogram_counts_spans_and_names()
+    test_type_histogram_colliding_id_differs_by_bytes()
+    test_type_histogram_merges_shards()
+    test_type_histogram_is_absent_when_offsets_cannot_be_trusted()
+    test_type_histogram_is_absent_when_a_span_is_smaller_than_the_type_layout()
+    test_type_histogram_bounds_name_patterns()
     print('All tests passed.')
 
 

@@ -261,11 +261,13 @@ def _read_kv(f, r, kv_count):
             return
 
 
-def _read_tensors(f, r, tensor_count):
+def _read_tensors(f, r, tensor_count, rows=None):
     """Read the tensor table of one shard. Returns a list of
     (name, data_offset, type_math_bytes) headers, or a partial list if the
     table is truncated/corrupt. Byte accounting happens in _account_tensors
-    once real on-disk spans are known."""
+    once real on-disk spans are known. When rows is a list, every table entry
+    read is also appended to it as (name, type, elements, offset) for the type
+    histogram."""
     tensors = []
     end = _stream_end(f)
     for _ in range(tensor_count):
@@ -311,6 +313,8 @@ def _read_tensors(f, r, tensor_count):
                 # Track unknown types so callers can warn.
                 tbytes = n_elements // 2
                 r.setdefault('unknown_ttypes', set()).add(ttype)
+            if rows is not None:
+                rows.append((tname, ttype, n_elements, offset))
             tensors.append((tname, offset, tbytes))
         except Exception:
             break
@@ -429,6 +433,121 @@ def _account_tensors(r, tensors, header_end, file_size, align, shard=None):
                 r['output_bytes'] = r.get('output_bytes', 0) + nbytes
 
 
+# Tensor type histogram (the Go reader is gguf.ReadTypeHistogram): per type id
+# the table entries using it, their elements and their bytes by on-disk span.
+# Ids are reported as numbers, never named: ids from 40 up mean different
+# encodings in different backends. Bounds mirror the Go constants.
+_TYPE_MAX_IDS = 256
+_TYPE_NAME_SET = 1024
+_TYPE_NAMES_OUT = 128
+_I64_MAX = (1 << 63) - 1
+
+
+def _name_pattern(name):
+    """A tensor name with every all-digit dot segment written '*', or None for
+    a name that is empty or not printable ASCII."""
+    if not name or not (name.isascii() and name.isprintable()):
+        return None
+    # The name is ASCII here, so isdigit() is exactly 0-9 (and false for '').
+    return '.'.join('*' if seg.isdigit() else seg for seg in name.split('.'))
+
+
+# (bytes_per_block, elements_per_block) of the types whose layout is the same in
+# every backend; mirrors ggmlTypeSize in go/pkg/gguf/complete.go, which is
+# deliberately not GGUF_TYPE_SIZE above (that one also sizes ik_llama ids). A
+# tensor of one of these types in a smaller span than its layout needs means the
+# file is damaged or the id means something else; the Go reader then gives no
+# histogram, and so does this one.
+_LAYOUT_TYPES = {
+    0: (4, 1), 1: (2, 1),
+    2: (18, 32), 3: (20, 32), 6: (22, 32), 7: (24, 32), 8: (34, 32), 9: (36, 32),
+    10: (84, 256), 11: (110, 256), 12: (144, 256), 13: (176, 256), 14: (210, 256), 15: (292, 256),
+    16: (66, 256), 17: (74, 256), 18: (98, 256), 19: (50, 256), 20: (18, 32),
+    21: (110, 256), 22: (82, 256), 23: (136, 256),
+    24: (1, 1), 25: (2, 1), 26: (4, 1), 27: (8, 1), 28: (8, 1),
+    29: (56, 256), 30: (2, 1), 39: (17, 32),
+}
+
+
+def _row_spans(rows, header_end, file_size, align):
+    """On-disk span of each non-empty row (by position), or None when the
+    offsets are unusable: no data section, a first offset that is not 0, equal
+    or overlapping offsets, data past the end of the file, a span smaller than its type's
+    layout."""
+    live = [i for i, row in enumerate(rows) if row[2] > 0]
+    spans = {}
+    if not live:
+        return spans
+    if align <= 0:
+        align = 32
+    data_size = file_size - (header_end + align - 1) // align * align
+    if data_size <= 0:
+        return None
+    order = sorted(live, key=lambda i: rows[i][3])
+    if rows[order[0]][3] != 0:
+        return None
+    for k, i in enumerate(order):
+        off = rows[i][3]
+        end = rows[order[k + 1]][3] if k + 1 < len(order) else data_size
+        if off >= data_size or end > data_size or end <= off:
+            return None
+        spans[i] = end - off
+        layout = _LAYOUT_TYPES.get(rows[i][1])
+        if layout and spans[i] < (rows[i][2] + layout[1] - 1) // layout[1] * layout[0]:
+            return None
+    return spans
+
+
+def _account_types(r, rows, header_end, file_size, align, complete=True):
+    """Add one shard's table to the histogram. A truncated table
+    (complete=False) or unusable offsets make the whole histogram unreliable,
+    so it is dropped rather than reported partial."""
+    if not rows:
+        return
+    spans = _row_spans(rows, header_end, file_size, align) if complete else None
+    if spans is None:
+        r['_types_bad'] = True
+        return
+    acc = r.setdefault('_types', {})
+    for i, (tname, ttype, n_elements, _) in enumerate(rows):
+        e = acc.get(ttype)
+        if e is None:
+            if len(acc) >= _TYPE_MAX_IDS:
+                r['_types_bad'] = True
+                return
+            e = acc[ttype] = {'tensors': 0, 'elements': 0, 'bytes': 0, 'names': set(), 'cut': False}
+        e['tensors'] += 1
+        e['elements'] = min(e['elements'] + n_elements, _I64_MAX)
+        e['bytes'] = min(e['bytes'] + spans.get(i, 0), _I64_MAX)
+        pattern = _name_pattern(tname)
+        if pattern is not None and pattern not in e['names']:
+            if len(e['names']) < _TYPE_NAME_SET:
+                e['names'].add(pattern)
+            else:
+                e['cut'] = True
+
+
+def _finish_types(r):
+    """Replace the private accumulator with the public sorted tensor_types list;
+    nothing is emitted for an unreliable or empty histogram."""
+    acc = r.pop('_types', None)
+    bad = r.pop('_types_bad', False)
+    if bad or not acc:
+        return
+    out = []
+    for ttype in sorted(acc):
+        e = acc[ttype]
+        names = sorted(e['names'])
+        cut = e['cut'] or len(names) > _TYPE_NAMES_OUT
+        entry = {'type': ttype, 'tensors': e['tensors'], 'elements': e['elements'], 'bytes': e['bytes']}
+        if names:
+            entry['names'] = names[:_TYPE_NAMES_OUT]
+        if cut:
+            entry['names_truncated'] = True
+        out.append(entry)
+    r['tensor_types'] = out
+
+
 def parse(path: str) -> Dict[str, Any]:
     """Parse a GGUF file and return extracted metadata as a dict.
 
@@ -447,6 +566,9 @@ def parse(path: str) -> Dict[str, Any]:
     def read_shard(sp: str, meta: Dict[str, Any]) -> None:
         with open(sp, 'rb') as f:
             if f.read(4) != b'GGUF':
+                # A zero-filled or foreign shard: its tensors are unknown, so
+                # the histogram of the others would read as the whole model.
+                r['_types_bad'] = True
                 return
             f.read(4)  # version
             tensor_count = struct.unpack('<Q', f.read(8))[0]
@@ -455,19 +577,24 @@ def parse(path: str) -> Dict[str, Any]:
             if tensor_count * 24 > os.path.getsize(sp):
                 raise ValueError('tensor count %d exceeds the file' % tensor_count)
             _read_kv(f, meta, kv_count)
-            tensors = _read_tensors(f, r, tensor_count)
+            rows = []
+            tensors = _read_tensors(f, r, tensor_count, rows)
             if len(tensors) < tensor_count:
                 # Truncated tensor table: spans would swallow unread tensors'
                 # bytes. Account what we have via type-math only (file_size 0
                 # makes _account_tensors reject spans).
                 _account_tensors(r, tensors, 0, 0, 32)
+                r['_types_bad'] = True
                 return
             _account_tensors(r, tensors, f.tell(), os.path.getsize(sp),
                              meta.get('_align', 32), sp)
+            _account_types(r, rows, f.tell(), os.path.getsize(sp), meta.get('_align', 32))
 
     try:
         read_shard(path, r)
     except Exception:
+        r.pop('_types', None)
+        r.pop('_types_bad', None)
         return r
 
     # Split GGUF: scan sibling shards for tensor totals. KV metadata is
@@ -479,10 +606,12 @@ def parse(path: str) -> Dict[str, Any]:
         for sn in range(2, total + 1):
             sp = f'{base}-{sn:05d}-of-{total:05d}.gguf'
             if not os.path.exists(sp):
+                r['_types_bad'] = True
                 continue
             try:
                 read_shard(sp, {})
             except Exception:
+                r['_types_bad'] = True
                 continue
     if r.get('ssm') or r.get('arch') in _RECURRENT_ARCHS:
         r['recurrent'] = 1
@@ -510,6 +639,7 @@ def parse(path: str) -> Dict[str, Any]:
     if sparse_layers and r.get('sparse_lookup_bytes'):
         r['sparse_lookup_layer_ids'] = sorted(sparse_layers)
     r.pop('_lookup_layer_ids', None)
+    _finish_types(r)
     r.pop('_align', None)
     # Private parser bookkeeping is not part of the public JSON contract.
     r.pop('_first_moe_layer', None)

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"math"
 	"strings"
 	"time"
 )
@@ -60,12 +61,33 @@ type catalogRecipe struct {
 	Accel       string         `json:"accel,omitempty"`
 	Patches     []catalogPatch `json:"patches,omitempty"`
 
-	Kind                string   `json:"kind,omitempty"`                  // fork | pr | mainline
-	RequiredTensorTypes []string `json:"required_tensor_types,omitempty"` // tensor type names the build must understand
-	TensorCount         int      `json:"tensor_count,omitempty"`          // expected tensor count of the model it serves
-	SupersededBy        string   `json:"superseded_by,omitempty"`         // e.g. a mainline revision that replaces it
-	Evidence            []string `json:"evidence,omitempty"`              // links or ledger references
-	Expires             string   `json:"expires,omitempty"`               // YYYY-MM-DD, review-by date
+	Kind                string            `json:"kind,omitempty"`                  // fork | pr | mainline
+	RequiredTensorTypes []catalogEncoding `json:"required_tensor_types,omitempty"` // tensor encodings the model uses and the build must understand
+	TensorCount         int               `json:"tensor_count,omitempty"`          // expected tensor count of the model it serves (reserved, not evaluated)
+	SupersededBy        string            `json:"superseded_by,omitempty"`         // e.g. a mainline revision that replaces it
+	Evidence            []string          `json:"evidence,omitempty"`              // links or ledger references
+	Expires             string            `json:"expires,omitempty"`               // YYYY-MM-DD, review-by date
+}
+
+// catalogEncoding is one tensor encoding as written in the catalog. A type id
+// alone does not identify an encoding (ids from 40 up differ between backends),
+// so an entry pairs it with the name the backend's own source spells and,
+// where ids collide, a signature read from the file's tensor table.
+type catalogEncoding struct {
+	ID           *int64 `json:"id"`                      // GGML type id found in the file
+	Name         string `json:"name"`                    // as the backend source spells it, e.g. in its type table
+	TensorsMin   int64  `json:"tensors_min,omitempty"`   // signature: at least this many tensors use the id (default 1)
+	TensorsMax   int64  `json:"tensors_max,omitempty"`   // signature: at most this many (0 = no limit)
+	NameContains string `json:"name_contains,omitempty"` // signature: some tensor name pattern using the id contains this
+}
+
+// EncodingRequirement is a validated catalogEncoding.
+type EncodingRequirement struct {
+	ID           uint32
+	Name         string
+	TensorsMin   int64
+	TensorsMax   int64
+	NameContains string
 }
 
 // catalogNameRule requires a generic backend family for architectures whose
@@ -88,6 +110,9 @@ type catalogFile struct {
 type parsedCatalog struct {
 	recipes   []Recipe
 	nameRules []catalogNameRule
+	// encodings[i] are the tensor encodings recipes[i] requires (nil for most).
+	// They live here, not on Recipe, which is the registered-backend shape.
+	encodings [][]EncodingRequirement
 }
 
 var (
@@ -188,6 +213,7 @@ func loadCatalog(data []byte, patches fs.FS) (*parsedCatalog, error) {
 			recipe.Patches = append(recipe.Patches, RecipePatch{Name: p.Name, contents: body})
 		}
 		out.recipes = append(out.recipes, recipe)
+		out.encodings = append(out.encodings, validateEncodings(label, r.RequiredTensorTypes, fail))
 	}
 
 	seenRule := map[string]bool{}
@@ -217,6 +243,69 @@ func loadCatalog(data []byte, patches fs.FS) (*parsedCatalog, error) {
 		return nil, fmt.Errorf("invalid backend catalog: %w", err)
 	}
 	return out, nil
+}
+
+// validateEncodings checks one recipe's encodings, reporting every problem
+// through fail, and returns the valid ones.
+func validateEncodings(label string, in []catalogEncoding, fail func(string, ...any)) []EncodingRequirement {
+	var out []EncodingRequirement
+	seen := map[int64]bool{}
+	for i, e := range in {
+		elabel := fmt.Sprintf("%s required_tensor_types #%d", label, i+1)
+		ok := true
+		switch {
+		case e.ID == nil:
+			fail("%s: missing id", elabel)
+			ok = false
+		case *e.ID < 0 || *e.ID > math.MaxUint32:
+			fail("%s: id %d is not a tensor type id", elabel, *e.ID)
+			ok = false
+		case seen[*e.ID]:
+			fail("%s: duplicate id %d", elabel, *e.ID)
+			ok = false
+		default:
+			seen[*e.ID] = true
+		}
+		if !validEncodingName(e.Name) {
+			fail("%s: name %q must be 1 to 48 letters, digits or underscores", elabel, e.Name)
+			ok = false
+		}
+		if e.TensorsMin < 0 || e.TensorsMax < 0 || (e.TensorsMax > 0 && e.TensorsMin > e.TensorsMax) {
+			fail("%s: tensors_min %d and tensors_max %d are not a valid range", elabel, e.TensorsMin, e.TensorsMax)
+			ok = false
+		}
+		if e.NameContains != "" && !printableASCII(e.NameContains) {
+			fail("%s: name_contains %q must be printable ASCII", elabel, e.NameContains)
+			ok = false
+		}
+		if ok {
+			out = append(out, EncodingRequirement{
+				ID: uint32(*e.ID), Name: e.Name, TensorsMin: e.TensorsMin, TensorsMax: e.TensorsMax, NameContains: e.NameContains,
+			})
+		}
+	}
+	return out
+}
+
+func validEncodingName(s string) bool {
+	if s == "" || len(s) > 48 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if !(s[i] >= 'a' && s[i] <= 'z' || s[i] >= 'A' && s[i] <= 'Z' || s[i] >= '0' && s[i] <= '9' || s[i] == '_') {
+			return false
+		}
+	}
+	return true
+}
+
+func printableASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] < 0x20 || s[i] > 0x7e {
+			return false
+		}
+	}
+	return true
 }
 
 func isHexDigest(s string, n int) bool {

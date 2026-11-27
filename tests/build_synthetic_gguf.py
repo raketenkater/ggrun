@@ -78,13 +78,15 @@ def w_tensor_header(buf, name, dims, ttype, offset=0):
 
 
 def parse_tensor_spec(spec):
-    """Parse 'name:dim1,dim2,...:ttype' into (name, [dims], ttype)."""
+    """Parse 'name:dim1,dim2,...:ttype[:bytes]' into (name, [dims], ttype,
+    bytes-or-None). bytes is the tensor's on-disk size, used only with
+    --real-spans."""
     parts = spec.split(':')
-    if len(parts) != 3:
-        raise ValueError(f'bad --tensor spec {spec!r}: want name:dims:ttype')
-    name, dim_str, ttype_str = parts
+    if len(parts) not in (3, 4):
+        raise ValueError(f'bad --tensor spec {spec!r}: want name:dims:ttype[:bytes]')
+    name, dim_str, ttype_str = parts[:3]
     dims = [int(d) for d in dim_str.split(',')]
-    return name, dims, int(ttype_str)
+    return name, dims, int(ttype_str), int(parts[3]) if len(parts) == 4 else None
 
 
 def build(args):
@@ -155,6 +157,8 @@ def build(args):
     if args.engram_layers:
         prefix = args.engram_prefix or arch
         kv_pairs.append((f'{prefix}.engram.layer_ids', 'int32s', [int(v) for v in args.engram_layers.split(',')]))
+    if args.real_spans and args.align != 32:
+        kv_pairs.append(('general.alignment', 'uint32', args.align))
     for item in args.u32 or []:
         name, _, value = item.partition('=')
         kv_pairs.append((f'{arch}.{name}', 'uint32', int(value)))
@@ -178,8 +182,20 @@ def build(args):
         else:
             raise ValueError(f'unhandled type {vtype}')
 
-    for name, dims, ttype in tensors:
-        w_tensor_header(out, name, dims, ttype)
+    offset = 0
+    for name, dims, ttype, nbytes in tensors:
+        if args.real_spans:
+            if nbytes is None:
+                raise ValueError(f'--real-spans needs name:dims:ttype:bytes, got no bytes for {name!r}')
+            w_tensor_header(out, name, dims, ttype, offset)
+            offset += nbytes
+        else:
+            w_tensor_header(out, name, dims, ttype)
+    if args.real_spans and tensors:
+        # Tensor data starts at the header end rounded up to the alignment and
+        # holds each tensor's bytes back to back: offsets, and so spans, are real.
+        header_len = sum(len(chunk) for chunk in out)
+        out.append(b'\0' * ((-header_len) % args.align + offset))
 
     blob = b''.join(out)
     with open(args.out, 'wb') as f:
@@ -224,8 +240,15 @@ def main():
     ap.add_argument('--ssm', action='store_true')
     ap.add_argument('--tensor', action='append', default=[],
                     help='emit a synthetic tensor header: name:dim1,dim2,...:ttype '
-                         '(repeatable). No tensor data is written; the parser only '
-                         'reads headers.')
+                         '(repeatable). By default no tensor data is written and every '
+                         'tensor sits at offset 0; the parser only reads headers. With '
+                         '--real-spans each spec also states its on-disk size, '
+                         'name:dims:ttype:bytes.')
+    ap.add_argument('--real-spans', action='store_true',
+                    help='lay the tensors out back to back with a zero-filled data section, '
+                         'so their offsets and spans are real')
+    ap.add_argument('--align', type=int, default=32,
+                    help='data alignment for --real-spans (written as general.alignment when not 32)')
     args = ap.parse_args()
     build(args)
 

@@ -111,6 +111,36 @@ type Info struct {
 	// wider than SSM, which also describes the block layout: GLM-5.3-Flash and
 	// Inkling state no ssm.state_size but still resume only from checkpoints.
 	RecurrentState int `json:"recurrent"`
+
+	// TensorTypes is the tensor type histogram (see TypeUsage), written by the
+	// helper from its own tensor-table walk. It is absent for a helper that
+	// predates it and for a file whose offsets are unusable (an interrupted
+	// download, a truncated table, a missing shard), so an empty value means
+	// "unknown", never "no tensors of any type".
+	TensorTypes []TypeUsage `json:"tensor_types,omitempty"`
+}
+
+// UnmarshalJSON decodes the helper's output. The optional tensor_types field is
+// decoded on its own: one of a shape this build does not know (an old or foreign
+// helper) leaves TensorTypes nil, which means "unknown", instead of failing the
+// whole parse and the launch with it.
+func (i *Info) UnmarshalJSON(data []byte) error {
+	type plain Info
+	aux := struct {
+		*plain
+		TensorTypes json.RawMessage `json:"tensor_types"`
+	}{plain: (*plain)(i)}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	i.TensorTypes = nil
+	if len(aux.TensorTypes) > 0 {
+		var types []TypeUsage
+		if json.Unmarshal(aux.TensorTypes, &types) == nil {
+			i.TensorTypes = types
+		}
+	}
+	return nil
 }
 
 // Parse calls the bundled GGUF metadata helper.
