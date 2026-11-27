@@ -38,12 +38,19 @@ func backendUsage() {
   add <git-url> [flags]             Clone, build, and register a custom llama.cpp backend
   register [flags]                  Register an already-built binary
   remove <tag> [--purge] [--dry-run] [--yes] [--force-not-running]
+             [--discard-local-work]
                                     Unregister a backend; --purge also deletes its
                                     source tree and builds (asks first, or --yes)
   status                            Build age, upstream-superseded and pin check
-  gc [--delete] [--yes] [--force-not-running]
+  gc [--delete] [--yes] [--force-not-running] [--discard-local-work]
                                     List source trees and build directories no
                                     backend uses; --delete asks, --yes does not
+  A tree that may hold local work (commits, stashes, edits, or unknown) is
+  deleted only with --yes --discard-local-work. Deletion also refuses trees with
+  linked git worktrees, a symlinked .src, and trees changed in the last 30 minutes.
+  The running-process check reads /proc, so it covers only this user's processes
+  on Linux; elsewhere, or for another user's backend, check yourself and pass
+  --force-not-running.
 
 add/register flags:
   --tag <name>          Selection name (default: derived from URL)
@@ -295,13 +302,11 @@ func addBackendRecipe(args []string, recipe *backends.Recipe) error {
 		return fmt.Errorf("source checkout failed: %v", err)
 	}
 
-	fmt.Printf("[backend] building (%s)… %s\n", accel, buildEstimate(backends.ByTag(tag)))
-	buildStarted := time.Now()
+	fmt.Printf("[backend] building (%s)… this can take 30–60 min\n", accel)
 	bin, err := buildLlamaFork(srcDir, accel, f["cuda-arch"])
 	if err != nil {
 		return fmt.Errorf("build failed: %v", err)
 	}
-	measured := recordBuild(srcDir, accel, time.Since(buildStarted))
 	if err := validateBackendCandidate(bin, f["route-arch"], accel); err != nil {
 		return fmt.Errorf("backend conformance failed; refusing registration: %v", err)
 	}
@@ -310,7 +315,7 @@ func addBackendRecipe(args []string, recipe *backends.Recipe) error {
 	}
 
 	actualCommit, _ := gitOutput(srcDir, "rev-parse", "HEAD")
-	be := backends.Backend{Tag: tag, Path: bin, RouteArch: f["route-arch"], GitURL: url, Branch: branch, Commit: strings.TrimSpace(actualCommit), HelperOnly: strings.EqualFold(f["helper-only"], "true"), Build: measured}
+	be := backends.Backend{Tag: tag, Path: bin, RouteArch: f["route-arch"], GitURL: url, Branch: branch, Commit: strings.TrimSpace(actualCommit), HelperOnly: strings.EqualFold(f["helper-only"], "true")}
 	if recipe != nil {
 		be.AppliedPatches = recipe.PatchNames()
 	}

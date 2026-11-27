@@ -39,6 +39,15 @@ var (
 	// ErrRecentlyModified: files in the tree changed lately, so a build may be
 	// writing to it.
 	ErrRecentlyModified = errors.New("tree was modified recently; a build may be running")
+	// ErrSourceRootSymlink: .src is a symlink, so the trees belong to another
+	// app home whose registrations this manifest does not know.
+	ErrSourceRootSymlink = errors.New("not deletable: .src is a symlink to another location; run cleanup from the app home that owns it")
+	// ErrLinkedWorktrees: git worktrees elsewhere keep their objects in the tree.
+	ErrLinkedWorktrees = errors.New("tree is the main checkout of linked git worktrees")
+	// ErrLocalWork: the tree may hold work that exists nowhere else.
+	ErrLocalWork = errors.New("tree may hold local work that exists nowhere else; pass --yes --discard-local-work to delete it anyway")
+	// ErrManifestMissing: there is no backends.json, so registrations are unknown.
+	ErrManifestMissing = errors.New("backend manifest does not exist")
 )
 
 // defaultQuietWindow is how long a tree must be untouched before gc offers it.
@@ -63,6 +72,9 @@ type CleanupEnv struct {
 	// ForceNotRunning (--force-not-running) lets deletion proceed when the
 	// process table is unavailable. It never overrides a process that is seen.
 	ForceNotRunning bool
+	// DiscardLocalWork (--yes --discard-local-work) allows deleting a tree whose
+	// LocalWork is non-empty (detected or unknown).
+	DiscardLocalWork bool
 	// ManifestErr is set when backends.json exists but could not be read. Cleanup
 	// then plans nothing: an unreadable manifest would make every registered
 	// tree look unreferenced.
@@ -81,6 +93,9 @@ type TreePlan struct {
 	Newest time.Time // newest modification time inside
 	Links  []string  // .bin symlinks that point into the tree and go with it
 	Tags   []string  // registrations that point into the tree
+	// LocalWork is what might exist only in this tree ("" when none was found
+	// and everything could be read); see CleanupEnv.LocalWork. Whole trees only.
+	LocalWork string
 	// Blocked is why gc will not delete it ("" when it may).
 	Blocked string
 }
@@ -143,12 +158,33 @@ func rootRel(srcRoot, p string) (string, bool) {
 	if rel, ok := relUnder(absRoot, absP); ok {
 		return rel, true
 	}
-	realRoot, err1 := filepath.EvalSymlinks(absRoot)
-	realP, err2 := filepath.EvalSymlinks(absP)
-	if err1 == nil && err2 == nil {
-		return relUnder(realRoot, realP)
+	realRoot, err := filepath.EvalSymlinks(absRoot)
+	if err != nil {
+		return "", false
 	}
-	return "", false
+	// The resolved spellings, without needing the file to exist: a registration
+	// whose binary is gone still refers to its tree.
+	if rel, ok := relUnder(realRoot, absP); ok {
+		return rel, true
+	}
+	return relUnder(realRoot, evalLoose(absP))
+}
+
+// evalLoose resolves symlinks in the longest existing prefix of p and appends
+// the rest unchanged.
+func evalLoose(p string) string {
+	tail := ""
+	for cur := p; ; {
+		if real, err := filepath.EvalSymlinks(cur); err == nil {
+			return filepath.Join(real, tail)
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return p
+		}
+		tail = filepath.Join(filepath.Base(cur), tail)
+		cur = parent
+	}
 }
 
 // treeOf returns the first-level directory of the source root that holds p, or
@@ -350,40 +386,89 @@ func describeProcs(procs []ProcInfo) string {
 	return strings.Join(parts, ", ")
 }
 
-// checkPlan applies every safety rule to a plan. It is run when planning and
-// again immediately before deleting.
-func (env CleanupEnv) checkPlan(p TreePlan) error {
-	absRoot, err := filepath.Abs(SourceRoot(env.AppHome))
+// realSourceRoot resolves <app home>/.src and refuses when .src itself is a
+// symlink: its trees then belong to another app home.
+func (env CleanupEnv) realSourceRoot() (string, error) {
+	absHome, err := filepath.Abs(env.AppHome)
 	if err != nil {
-		return err
+		return "", err
 	}
+	realHome, err := filepath.EvalSymlinks(absHome)
+	if err != nil {
+		return "", fmt.Errorf("app home %s: %w", absHome, err)
+	}
+	absRoot := filepath.Join(absHome, ".src")
 	realRoot, err := filepath.EvalSymlinks(absRoot)
 	if err != nil {
-		return fmt.Errorf("source root %s: %w", absRoot, err)
+		return "", fmt.Errorf("source root %s: %w", absRoot, err)
+	}
+	if !samePath(realRoot, filepath.Join(realHome, ".src")) {
+		return "", fmt.Errorf("%w (%s -> %s)", ErrSourceRootSymlink, absRoot, realRoot)
+	}
+	return realRoot, nil
+}
+
+func (env CleanupEnv) window() time.Duration {
+	if env.QuietWindow > 0 {
+		return env.QuietWindow
+	}
+	return defaultQuietWindow
+}
+
+// quietErr refuses a tree whose newest file changed within the quiet window.
+func (env CleanupEnv) quietErr(newest time.Time) error {
+	if newest.IsZero() {
+		return nil
+	}
+	if age := env.now().Sub(newest); age < env.window() {
+		return fmt.Errorf("%w (changed %s ago)", ErrRecentlyModified, age.Round(time.Minute))
+	}
+	return nil
+}
+
+// checkPlan applies every path and process rule to a plan, when planning and
+// again immediately before deleting. It returns the resolved path it
+// validated: that, and nothing else, is what may be removed.
+func (env CleanupEnv) checkPlan(p TreePlan) (string, error) {
+	realRoot, err := env.realSourceRoot()
+	if err != nil {
+		return "", err
 	}
 	real, err := resolveUnderRoot(realRoot, p.Path)
 	if err != nil {
-		return err
+		return "", err
 	}
 	top := treeOf(realRoot, real)
 	if top == "" || !IsIsolatedForkSourceDir(top) {
-		return fmt.Errorf("%w: %s", ErrNotForkTree, real)
+		return "", fmt.Errorf("%w: %s", ErrNotForkTree, real)
+	}
+	if samePath(real, top) {
+		if err := checkWorktrees(real); err != nil {
+			return "", err
+		}
 	}
 	procs, err := env.runningFrom(real)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if len(procs) > 0 {
-		return fmt.Errorf("%w %s: %s", ErrRunning, real, describeProcs(procs))
+		return "", fmt.Errorf("%w %s: %s", ErrRunning, real, describeProcs(procs))
 	}
-	return nil
+	return real, nil
+}
+
+// wholeTree reports whether real is a first-level fork tree (not a build
+// directory inside one).
+func (env CleanupEnv) wholeTree(real string) bool {
+	realRoot, err := env.realSourceRoot()
+	return err == nil && samePath(real, treeOf(realRoot, real))
 }
 
 // PlanPurge plans removing one backend's source tree (the build directories are
 // inside it). It returns a refusal as an error and deletes nothing.
 func PlanPurge(env CleanupEnv, tag string) (TreePlan, error) {
 	if env.ManifestErr != nil {
-		return TreePlan{}, fmt.Errorf("backend manifest unreadable: %w", env.ManifestErr)
+		return TreePlan{}, fmt.Errorf("backend manifest unavailable, so nothing is planned: %w", env.ManifestErr)
 	}
 	var be *Backend
 	for i := range env.Backends {
@@ -415,11 +500,15 @@ func PlanPurge(env CleanupEnv, tag string) (TreePlan, error) {
 		return TreePlan{}, fmt.Errorf("%w: %s also serves %s", ErrSharedTree, filepath.Base(tree), strings.Join(shared, ", "))
 	}
 	plan := TreePlan{Path: real, Kind: "source tree", Tags: []string{be.Tag}}
-	if err := env.checkPlan(plan); err != nil {
+	if _, err := env.checkPlan(plan); err != nil {
 		return TreePlan{}, err
 	}
 	plan.Bytes, plan.Files, plan.Newest = measureTree(real)
+	if err := env.quietErr(plan.Newest); err != nil {
+		return TreePlan{}, err
+	}
 	plan.Links = linksInto(env.AppHome, real)
+	plan.LocalWork = env.LocalWork(real)
 	return plan, nil
 }
 
@@ -445,7 +534,7 @@ func isStaleBuildName(name string) bool {
 // Entries that cannot be deleted right now carry Blocked.
 func PlanGC(env CleanupEnv) ([]TreePlan, error) {
 	if env.ManifestErr != nil {
-		return nil, fmt.Errorf("backend manifest unreadable, so nothing can be called unreferenced: %w", env.ManifestErr)
+		return nil, fmt.Errorf("backend manifest unavailable, so nothing can be called unreferenced: %w", env.ManifestErr)
 	}
 	srcRoot := SourceRoot(env.AppHome)
 	entries, err := os.ReadDir(srcRoot)
@@ -457,10 +546,6 @@ func PlanGC(env CleanupEnv) ([]TreePlan, error) {
 	}
 	absRoot, _ := filepath.Abs(srcRoot)
 	trees := registeredTrees(env)
-	window := env.QuietWindow
-	if window <= 0 {
-		window = defaultQuietWindow
-	}
 	usedBuilds := map[string]bool{}
 	for _, b := range env.Backends {
 		paths := []string{b.Path}
@@ -479,11 +564,20 @@ func PlanGC(env CleanupEnv) ([]TreePlan, error) {
 	finish := func(p TreePlan) TreePlan {
 		p.Bytes, p.Files, p.Newest = measureTree(p.Path)
 		p.Links = linksInto(env.AppHome, p.Path)
-		switch err := env.checkPlan(p); {
-		case err != nil:
+		_, err := env.checkPlan(p)
+		if err == nil {
+			err = env.quietErr(p.Newest)
+		}
+		if err == nil && env.wholeTree(p.Path) {
+			if p.LocalWork = env.LocalWork(p.Path); p.LocalWork != "" && !env.DiscardLocalWork {
+				err = fmt.Errorf("local work: %s; delete only with --yes --discard-local-work", p.LocalWork)
+			}
+		}
+		if err == nil && p.Kind == "orphan source tree" && len(p.Links) > 0 {
+			err = fmt.Errorf("referenced from .bin by %s; remove the link if it is unused", strings.Join(p.Links, ", "))
+		}
+		if err != nil {
 			p.Blocked = err.Error()
-		case env.now().Sub(p.Newest) < window:
-			p.Blocked = fmt.Sprintf("%s (changed %s ago)", ErrRecentlyModified, env.now().Sub(p.Newest).Round(time.Minute))
 		}
 		return p
 	}
@@ -528,18 +622,36 @@ func PlanGC(env CleanupEnv) ([]TreePlan, error) {
 }
 
 // Delete removes one planned directory and the .bin links that point into it.
-// It re-checks every rule first and uses RemoveAll, which unlinks a symlink
-// inside the tree rather than following it. It returns the paths removed.
+// It re-checks every rule first and removes the resolved path it checked, never
+// the plan's own string: a plan whose path is not absolute and clean, or does
+// not resolve to itself, is refused. RemoveAll unlinks a symlink inside the
+// tree rather than following it. It returns the paths removed.
 func (env CleanupEnv) Delete(p TreePlan) ([]string, error) {
-	if err := env.checkPlan(p); err != nil {
+	if !filepath.IsAbs(p.Path) || p.Path != filepath.Clean(p.Path) {
+		return nil, fmt.Errorf("%w: plan path %q is not absolute and clean", ErrOutsideRoot, p.Path)
+	}
+	real, err := env.checkPlan(p)
+	if err != nil {
 		return nil, err
 	}
-	var removed []string
-	if err := os.RemoveAll(p.Path); err != nil {
-		return removed, fmt.Errorf("remove %s: %w", p.Path, err)
+	if !samePath(real, p.Path) {
+		return nil, fmt.Errorf("%w: plan path %s resolves to %s", ErrSymlink, p.Path, real)
 	}
-	removed = append(removed, p.Path)
-	for _, l := range linksInto(env.AppHome, p.Path) {
+	_, _, newest := measureTree(real)
+	if err := env.quietErr(newest); err != nil {
+		return nil, err
+	}
+	if env.wholeTree(real) && !env.DiscardLocalWork {
+		if lw := env.LocalWork(real); lw != "" {
+			return nil, fmt.Errorf("%w: %s", ErrLocalWork, lw)
+		}
+	}
+	var removed []string
+	if err := os.RemoveAll(real); err != nil {
+		return removed, fmt.Errorf("remove %s: %w", real, err)
+	}
+	removed = append(removed, real)
+	for _, l := range linksInto(env.AppHome, real) {
 		if info, err := os.Lstat(l); err == nil && info.Mode()&os.ModeSymlink != 0 {
 			if err := os.Remove(l); err == nil {
 				removed = append(removed, l)

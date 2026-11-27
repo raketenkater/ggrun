@@ -228,13 +228,11 @@ func updateRegisteredBackend(tag string) error {
 		}
 	}()
 	fmt.Printf("[backend] building isolated candidate (%s)… %s\n", layout.accel, buildEstimate(be))
-	buildStarted := time.Now()
 	candidateBin, err := buildLlamaForkAt(layout.srcDir, candidateBuildDir, layout.accel, "")
 	if err != nil {
 		restoreSource("build failed")
 		return fmt.Errorf("build failed: %w", err)
 	}
-	buildSeconds := time.Since(buildStarted)
 	if err := validateBackendCandidate(candidateBin, be.RouteArch, layout.accel); err != nil {
 		restoreSource("candidate conformance failed")
 		return fmt.Errorf("candidate conformance failed; active backend unchanged: %w", err)
@@ -281,7 +279,6 @@ func updateRegisteredBackend(tag string) error {
 	updated.Path = bin
 	updated.Commit = newCommit
 	updated.Previous = prev
-	updated.Build = recordBuild(layout.srcDir, layout.accel, buildSeconds)
 	if recipe != nil {
 		updated.AppliedPatches = recipe.PatchNames()
 		updated.HelperOnly = recipe.HelperOnly

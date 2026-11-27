@@ -410,14 +410,14 @@ func Load() []Backend {
 	return list
 }
 
-// LoadStrict is Load for callers that must tell "no backends" from "cannot
-// read the manifest": a missing file is an empty list, any other failure is an
-// error.
+// LoadStrict is Load for callers that must not mistake "cannot read the
+// manifest" for "no backends": a missing file is ErrManifestMissing and any
+// other failure is returned as is.
 func LoadStrict() ([]Backend, error) {
 	list, err := loadManifest(ManifestPath())
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, nil
+			return nil, fmt.Errorf("%w: %s", ErrManifestMissing, ManifestPath())
 		}
 		return nil, err
 	}

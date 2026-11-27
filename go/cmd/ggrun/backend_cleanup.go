@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -32,12 +31,13 @@ func defaultCleanupIO() cleanupIO {
 
 // cleanupOpts are the flags of remove and gc.
 type cleanupOpts struct {
-	Tag             string
-	Purge           bool
-	Delete          bool // gc: delete after confirming
-	DryRun          bool
-	Yes             bool
-	ForceNotRunning bool
+	Tag              string
+	Purge            bool
+	Delete           bool // gc: delete after confirming
+	DryRun           bool
+	Yes              bool
+	ForceNotRunning  bool
+	DiscardLocalWork bool
 }
 
 func parseCleanupArgs(args []string, wantTag bool) (cleanupOpts, error) {
@@ -54,6 +54,8 @@ func parseCleanupArgs(args []string, wantTag bool) (cleanupOpts, error) {
 			o.Yes = true
 		case "--force-not-running":
 			o.ForceNotRunning = true
+		case "--discard-local-work":
+			o.DiscardLocalWork = true
 		default:
 			if strings.HasPrefix(a, "-") {
 				return o, backendUsageError(fmt.Sprintf("unknown flag %s", a))
@@ -77,7 +79,10 @@ func defaultCleanupEnv(o cleanupOpts) backends.CleanupEnv {
 		Backends:        list,
 		Processes:       backends.PlatformProcessLister(),
 		ForceNotRunning: o.ForceNotRunning,
-		ManifestErr:     err,
+		// Deleting a tree that may hold local work needs both flags; a typed "y"
+		// is not enough.
+		DiscardLocalWork: o.Yes && o.DiscardLocalWork,
+		ManifestErr:      err,
 	}
 }
 
@@ -103,6 +108,12 @@ func printPlan(out io.Writer, p backends.TreePlan, now time.Time) {
 		fmt.Fprintf(out, ", last changed %s ago", cleanupAge(now.Sub(p.Newest)))
 	}
 	fmt.Fprintln(out)
+	switch {
+	case p.LocalWork != "":
+		fmt.Fprintf(out, "    local work: %s\n", p.LocalWork)
+	case p.Kind != "stale build directory" && p.Blocked == "":
+		fmt.Fprintln(out, "    local work: none found (read from the .git files)")
+	}
 	if len(p.Tags) > 0 && p.Kind != "source tree" {
 		fmt.Fprintf(out, "    belongs to registered backend(s): %s\n", strings.Join(p.Tags, ", "))
 	}
@@ -139,9 +150,23 @@ func runBackendRemove(args []string, io cleanupIO, envFor func(cleanupOpts) back
 		return nil
 	}
 	if o.Purge {
+		if plan.LocalWork != "" && !env.DiscardLocalWork {
+			return fmt.Errorf("not purging %q: %w: %s", o.Tag, backends.ErrLocalWork, plan.LocalWork)
+		}
 		if err := confirmDeletion(o, io, fmt.Sprintf("Delete %s and unregister %q?", cleanupBytes(plan.Bytes), o.Tag)); err != nil {
 			return err
 		}
+		// The confirmation may have waited a long time: read the manifest and
+		// check every rule again before changing anything.
+		env = envFor(o)
+		again, err := backends.PlanPurge(env, o.Tag)
+		if err != nil {
+			return fmt.Errorf("not purging %q after confirmation: %w", o.Tag, err)
+		}
+		if again.Path != plan.Path {
+			return fmt.Errorf("not purging %q: its tree changed from %s to %s while waiting", o.Tag, plan.Path, again.Path)
+		}
+		plan = again
 	}
 	// Unregister first: a launch must never pick a backend whose tree is going.
 	found, err := unregister(o.Tag)
@@ -166,8 +191,9 @@ func runBackendRemove(args []string, io cleanupIO, envFor func(cleanupOpts) back
 }
 
 // runBackendGC is `backend gc [--delete] [--yes] [--dry-run]
-// [--force-not-running]`: it lists unreferenced source trees and stale build
-// directories, and deletes them only with --yes or a confirmed --delete.
+// [--force-not-running] [--discard-local-work]`: it lists unreferenced source
+// trees and stale build directories, and deletes them only with --yes or a
+// confirmed --delete.
 func runBackendGC(args []string, io cleanupIO, envFor func(cleanupOpts) backends.CleanupEnv) error {
 	o, err := parseCleanupArgs(args, false)
 	if err != nil {
@@ -209,8 +235,27 @@ func runBackendGC(args []string, io cleanupIO, envFor func(cleanupOpts) backends
 	if err := confirmDeletion(o, io, fmt.Sprintf("Delete these %d directories (%s)?", len(deletable), cleanupBytes(total))); err != nil {
 		return err
 	}
+	// Re-read the manifest and re-plan after the confirmation: delete only what
+	// is still unreferenced, unblocked and quiet.
+	env = envFor(o)
+	fresh, err := backends.PlanGC(env)
+	if err != nil {
+		return fmt.Errorf("not deleting: %w", err)
+	}
+	stillOK := map[string]backends.TreePlan{}
+	for _, p := range fresh {
+		if p.Blocked == "" {
+			stillOK[p.Path] = p
+		}
+	}
 	var failed []string
-	for _, p := range deletable {
+	for _, planned := range deletable {
+		p, ok := stillOK[planned.Path]
+		if !ok {
+			fmt.Fprintf(io.Out, "Skipped %s: it changed while waiting for confirmation\n", planned.Path)
+			failed = append(failed, planned.Path)
+			continue
+		}
 		removed, err := env.Delete(p)
 		for _, r := range removed {
 			fmt.Fprintf(io.Out, "Removed %s\n", r)
@@ -359,32 +404,6 @@ func buildEstimate(prev *backends.Backend) string {
 		return s
 	}
 	return "this can take 30–60 min"
-}
-
-// recordBuild measures the finished build for storage next to the registration.
-func recordBuild(srcDir, accel string, elapsed time.Duration) *backends.BuildRecord {
-	rec := &backends.BuildRecord{
-		Seconds: int64(elapsed.Round(time.Second) / time.Second),
-		Accel:   accel,
-		At:      time.Now().UTC().Format(time.RFC3339),
-	}
-	rec.TreeBytes = dirBytes(srcDir)
-	return rec
-}
-
-// dirBytes sums regular file sizes under dir without following symlinks.
-func dirBytes(dir string) int64 {
-	var total int64
-	_ = filepath.WalkDir(dir, func(_ string, d os.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
-		if info, err := d.Info(); err == nil && info.Mode().IsRegular() {
-			total += info.Size()
-		}
-		return nil
-	})
-	return total
 }
 
 func cleanupBytes(n int64) string {

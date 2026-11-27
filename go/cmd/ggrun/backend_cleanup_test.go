@@ -21,6 +21,8 @@ type cleanupFixture struct {
 	noProc bool
 }
 
+const testForkSHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
 func newCleanupFixture(t *testing.T) *cleanupFixture {
 	t.Helper()
 	isolateConfig(t)
@@ -29,18 +31,20 @@ func newCleanupFixture(t *testing.T) *cleanupFixture {
 		t.Fatal(err)
 	}
 	t.Setenv("LLM_APP_HOME", home)
+	// Every command in these tests deletes through the real AppHome(): prove it
+	// is this test's temporary directory before anything can run.
+	if got := backends.AppHome(); got != home {
+		t.Fatalf("app home is %q, not the temporary %q; refusing to run deletion tests", got, home)
+	}
 	f := &cleanupFixture{t: t, home: home}
 	for _, name := range []string{"fork-a", "fork-b", "fork-orphan"} {
 		f.file(".src/"+name+"/src/main.cpp", "int main(){}")
+		f.file(".src/"+name+"/.git/HEAD", testForkSHA+"\n")
+		f.file(".src/"+name+"/.git/refs/remotes/origin/main", testForkSHA+"\n")
+		f.file(".src/"+name+"/.git/index", "index")
 		f.file(".src/"+name+"/build-cuda/bin/llama-server", "binary")
 	}
-	old := time.Now().Add(-72 * time.Hour)
-	_ = filepath.WalkDir(filepath.Join(home, ".src"), func(p string, _ os.DirEntry, err error) error {
-		if err == nil {
-			_ = os.Chtimes(p, old, old)
-		}
-		return nil
-	})
+	f.settle()
 	if err := backends.Save([]backends.Backend{
 		{Tag: "a", Path: f.path(".src/fork-a/build-cuda/bin/llama-server")},
 		{Tag: "b", Path: f.path(".src/fork-b/build-cuda/bin/llama-server")},
@@ -48,6 +52,17 @@ func newCleanupFixture(t *testing.T) *cleanupFixture {
 		t.Fatal(err)
 	}
 	return f
+}
+
+// settle makes everything under .src 72 hours old.
+func (f *cleanupFixture) settle() {
+	old := time.Now().Add(-72 * time.Hour)
+	_ = filepath.WalkDir(f.path(".src"), func(p string, _ os.DirEntry, err error) error {
+		if err == nil {
+			_ = os.Chtimes(p, old, old)
+		}
+		return nil
+	})
 }
 
 func (f *cleanupFixture) path(rel string) string {
@@ -72,6 +87,9 @@ func (f *cleanupFixture) exists(rel string) bool {
 
 func (f *cleanupFixture) env(o cleanupOpts) backends.CleanupEnv {
 	e := defaultCleanupEnv(o)
+	if e.AppHome != f.home {
+		f.t.Fatalf("cleanup env targets %q, not the temporary app home %q", e.AppHome, f.home)
+	}
 	e.Processes = func() ([]backends.ProcInfo, error) { return f.procs, nil }
 	if f.noProc {
 		e.Processes = nil
@@ -273,14 +291,119 @@ func TestBackendCleanupRefusesWhenManifestIsCorrupt(t *testing.T) {
 	}
 }
 
-func TestBackendCleanupTreatsMissingManifestAsEmpty(t *testing.T) {
+func TestBackendCleanupPlansNothingWithoutAManifest(t *testing.T) {
 	f := newCleanupFixture(t)
 	if err := os.Remove(backends.ManifestPath()); err != nil {
 		t.Fatal(err)
 	}
-	if env := f.env(cleanupOpts{}); env.ManifestErr != nil || len(env.Backends) != 0 {
-		t.Fatalf("%+v", env)
+	if env := f.env(cleanupOpts{}); !errors.Is(env.ManifestErr, backends.ErrManifestMissing) {
+		t.Fatalf("a missing manifest must be reported, not read as empty: %+v", env.ManifestErr)
 	}
+	c, _ := tio(false, "")
+	if err := runBackendGC([]string{"--yes"}, c, f.env); err == nil || !strings.Contains(err.Error(), "does not exist") {
+		t.Fatalf("gc --yes without a manifest: %v", err)
+	}
+	for _, rel := range []string{".src/fork-a/src/main.cpp", ".src/fork-b/src/main.cpp", ".src/fork-orphan/src/main.cpp"} {
+		if !f.exists(rel) {
+			t.Fatalf("%s was deleted", rel)
+		}
+	}
+}
+
+func TestBackendPurgeNeedsBothFlagsForLocalWork(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		args    []string
+		term    bool
+		input   string
+		wantErr string
+	}{
+		{"typed y is not enough", []string{"a", "--purge"}, true, "y\n", "local work"},
+		{"--yes alone is not enough", []string{"a", "--purge", "--yes"}, false, "", "local work"},
+		{"the discard flag alone is not enough", []string{"a", "--purge", "--discard-local-work"}, true, "y\n", "local work"},
+		{"both flags", []string{"a", "--purge", "--yes", "--discard-local-work"}, false, "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newCleanupFixture(t)
+			f.file(".src/fork-a/.git/refs/stash", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n")
+			f.settle()
+			c, out := tio(tc.term, tc.input)
+			err := runBackendRemove(tc.args, c, f.env, backends.Remove)
+			if tc.wantErr == "" {
+				if err != nil || f.exists(".src/fork-a") || f.tags() != "b" {
+					t.Fatalf("%v tags=%q", err, f.tags())
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) || !f.exists(".src/fork-a/src/main.cpp") || f.tags() != "a,b" {
+				t.Fatalf("got %v tags=%q\n%s", err, f.tags(), out.String())
+			}
+			if !strings.Contains(out.String(), "stash entries") {
+				t.Fatalf("the plan must show what was found:\n%s", out.String())
+			}
+		})
+	}
+}
+
+func TestBackendPurgeRefusesWorktreesRecentChangeAndSymlinkedRoot(t *testing.T) {
+	t.Run("linked worktrees", func(t *testing.T) {
+		f := newCleanupFixture(t)
+		f.file(".src/fork-a/.git/worktrees/wt/gitdir", "/elsewhere/.git\n")
+		f.settle()
+		c, _ := tio(false, "")
+		if err := runBackendRemove([]string{"a", "--purge", "--yes"}, c, f.env, backends.Remove); err == nil || !strings.Contains(err.Error(), "worktree") || f.tags() != "a,b" {
+			t.Fatalf("%v", err)
+		}
+	})
+	t.Run("changed in the last 30 minutes", func(t *testing.T) {
+		f := newCleanupFixture(t)
+		f.file(".src/fork-a/build-cuda/new.o", "fresh")
+		c, _ := tio(false, "")
+		if err := runBackendRemove([]string{"a", "--purge", "--yes"}, c, f.env, backends.Remove); err == nil || !strings.Contains(err.Error(), "modified recently") || !f.exists(".src/fork-a/src/main.cpp") {
+			t.Fatalf("%v", err)
+		}
+	})
+}
+
+func TestBackendCleanupRechecksAfterConfirmation(t *testing.T) {
+	t.Run("gc: a registration appears while waiting", func(t *testing.T) {
+		f := newCleanupFixture(t)
+		calls := 0
+		envFor := func(o cleanupOpts) backends.CleanupEnv {
+			calls++
+			if calls == 2 {
+				if err := backends.Upsert(backends.Backend{Tag: "late", Path: f.path(".src/fork-orphan/build-cuda/bin/llama-server")}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			return f.env(o)
+		}
+		c, out := tio(false, "")
+		err := runBackendGC([]string{"--yes"}, c, envFor)
+		if err == nil || !f.exists(".src/fork-orphan/src/main.cpp") || !strings.Contains(out.String(), "changed while waiting") {
+			t.Fatalf("a tree registered after the listing must survive: %v\n%s", err, out.String())
+		}
+	})
+	t.Run("purge: the tree is shared while waiting", func(t *testing.T) {
+		f := newCleanupFixture(t)
+		calls := 0
+		envFor := func(o cleanupOpts) backends.CleanupEnv {
+			calls++
+			if calls == 2 {
+				f.file(".src/fork-a/build-vulkan/bin/llama-server", "x")
+				f.settle()
+				if err := backends.Upsert(backends.Backend{Tag: "a-vk", Path: f.path(".src/fork-a/build-vulkan/bin/llama-server")}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			return f.env(o)
+		}
+		c, _ := tio(false, "")
+		err := runBackendRemove([]string{"a", "--purge", "--yes"}, c, envFor, backends.Remove)
+		if err == nil || !strings.Contains(err.Error(), "after confirmation") || !f.exists(".src/fork-a/src/main.cpp") || f.tags() != "a,b,a-vk" {
+			t.Fatalf("%v tags=%q", err, f.tags())
+		}
+	})
 }
 
 func mustIO(terminal bool) cleanupIO {
@@ -353,23 +476,9 @@ func TestBuildEstimateFallsBackToConstant(t *testing.T) {
 	}
 }
 
-func TestRecordBuildMeasuresTreeAndTime(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "a"), make([]byte, 1500), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	rec := recordBuild(dir, "cuda", 95*time.Second)
-	if rec.Seconds != 95 || rec.TreeBytes != 1500 || rec.Accel != "cuda" {
-		t.Fatalf("%+v", rec)
-	}
-	if _, err := time.Parse(time.RFC3339, rec.At); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func TestParseCleanupArgs(t *testing.T) {
-	o, err := parseCleanupArgs([]string{"--purge", "tag", "--yes", "--force-not-running"}, true)
-	if err != nil || o.Tag != "tag" || !o.Purge || !o.Yes || !o.ForceNotRunning {
+	o, err := parseCleanupArgs([]string{"--purge", "tag", "--yes", "--force-not-running", "--discard-local-work"}, true)
+	if err != nil || o.Tag != "tag" || !o.Purge || !o.Yes || !o.ForceNotRunning || !o.DiscardLocalWork {
 		t.Fatalf("%+v %v", o, err)
 	}
 	for _, bad := range [][]string{{}, {"a", "b"}, {"--bogus", "a"}} {
