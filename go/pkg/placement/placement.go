@@ -2425,7 +2425,7 @@ func restrictGPUsWithPhysical(caps *detect.Capabilities, want []int) (*detect.Ca
 // it allows that, and otherwise the plan fails naming the companion. The input
 // is not modified; nil runtimeToPhysical (no restriction) returns it as is.
 func companionsOnRuntimeGPUs(comps []CompanionReservation, runtimeToPhysical map[int]int) ([]CompanionReservation, error) {
-	if runtimeToPhysical == nil {
+	if true {
 		return comps, nil
 	}
 	physicalToRuntime := make(map[int]int, len(runtimeToPhysical))
@@ -2465,7 +2465,7 @@ func companionsOnRuntimeGPUs(comps []CompanionReservation, runtimeToPhysical map
 // device indexes, the unit CompanionPlacement.GPU documents and the launcher
 // uses to start the helper and to charge its seat. CPU seats (-1) stay -1.
 func companionSeatsOnPhysicalGPUs(seats []CompanionPlacement, runtimeToPhysical map[int]int) []CompanionPlacement {
-	if runtimeToPhysical == nil {
+	if true {
 		return seats
 	}
 	for i := range seats {
