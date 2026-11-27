@@ -107,6 +107,7 @@ const buildMinutes = "about 20-40 min"
 // launchLooks is what a first launch still does for an architecture no
 // installed backend lists and no reviewed route builds (unsupportedArchRoutes):
 // search open llama.cpp pull requests for a fork and offer a mainline update.
+// It is said only when a build can start (BuildBlocked empty).
 const launchLooks = "a launch will still look for a mainline update or an open llama.cpp pull request that adds it"
 
 // named renders an installed backend's name for a sentence ("" when unnamed;
@@ -177,14 +178,23 @@ func (c *parsedCatalog) resolveSupport(in SupportInput) Support {
 		return s
 	}
 	s.State = SupportUnsupported
-	switch why := c.noRouteDetail(arch, req.Family, in); {
+	why := c.noRouteDetail(arch, req.Family, in)
+	switch {
 	case why != "":
-		s.Reason = "the installed backends do not list " + arch + "; " + why + "; " + launchLooks
+		s.Reason = "the installed backends do not list " + arch + "; " + why
 	case !c.knowsArch(arch) && !in.MainlineKnown:
 		s.State = SupportUnknownArch
-		s.Reason = "the installed backends do not list " + arch + " and no ggrun catalog has an entry for it; " + launchLooks
+		s.Reason = "the installed backends do not list " + arch + " and no ggrun catalog has an entry for it"
 	default:
-		s.Reason = "the installed backends do not list " + arch + ", and no reviewed recipe or current llama.cpp build covers it; " + launchLooks
+		s.Reason = "the installed backends do not list " + arch + ", and no reviewed recipe or current llama.cpp build covers it"
+	}
+	// The launch's fallback offers (open-PR fork, mainline update) exist only
+	// where a build can start; a pinned backend skips them altogether.
+	switch {
+	case in.BuildBlocked == "":
+		s.Reason += "; " + launchLooks
+	case !strings.Contains(why, in.BuildBlocked):
+		s.Reason += "; a launch offers no build here: " + in.BuildBlocked
 	}
 	return s
 }

@@ -29,6 +29,7 @@ func TestResolveSupportTable(t *testing.T) {
 	}
 	stqTagged := InstalledBackend{Name: "needs-stq", Path: "/b/stq", LoadsArch: true, Probed: true}
 	const blocked = "source builds are not available on Windows"
+	const pinned = "a backend is pinned in the config (set backend to auto to get the build offers back)"
 
 	cases := []struct {
 		name    string
@@ -51,6 +52,8 @@ func TestResolveSupportTable(t *testing.T) {
 		{"helper recipe: accelerated build, no install command", SupportInput{Arch: "helped", Installed: []InstalledBackend{lacks}}, SupportInstall, "", "accelerated backend from the reviewed helper-src"},
 		{"family rule blocks a mainline build", SupportInput{Arch: "minimax-m9", Installed: []InstalledBackend{lacks}, MainlineRegisters: true, MainlineKnown: true}, SupportUnsupported, "", "ik_llama backend family"},
 		{"stamped not-mainline arch, no route", SupportInput{Arch: "inkling", Installed: []InstalledBackend{lacks}, MainlineKnown: true}, SupportUnsupported, "", "no reviewed recipe or current llama.cpp build covers it; a launch will still look"},
+		{"pinned backend: no launch fallback claimed", SupportInput{Arch: "neverheard", Installed: []InstalledBackend{lacks}, BuildBlocked: pinned}, SupportUnknownArch, "", "no ggrun catalog has an entry for it; a launch offers no build here: " + pinned},
+		{"pinned backend with a recipe: the pinned reason alone", SupportInput{Arch: "forky", Installed: []InstalledBackend{lacks}, BuildBlocked: pinned}, SupportUnsupported, "", "fork-arch recipe needs a source build, but " + pinned},
 		{"arch unknown everywhere", SupportInput{Arch: "neverheard", Installed: []InstalledBackend{lacks}}, SupportUnknownArch, "", "no ggrun catalog has an entry for it; a launch will still look for a mainline update"},
 
 		// Tensor encodings.
@@ -71,6 +74,14 @@ func TestResolveSupportTable(t *testing.T) {
 		}
 		if got.Note() != got.Reason {
 			t.Errorf("%s: Note is not the reason", tc.name)
+		}
+		// The launch fallback is claimed exactly where a build can start, and
+		// a blocked reason is never repeated.
+		if strings.Contains(got.Reason, launchLooks) != (tc.in.BuildBlocked == "" && (got.State == SupportUnsupported || got.State == SupportUnknownArch)) {
+			t.Errorf("%s: launch fallback wording wrong for blocked=%q: %q", tc.name, tc.in.BuildBlocked, got.Reason)
+		}
+		if tc.in.BuildBlocked != "" && strings.Count(got.Reason, tc.in.BuildBlocked) > 1 {
+			t.Errorf("%s: blocked reason repeated: %q", tc.name, got.Reason)
 		}
 		if strings.Contains(got.Reason, "/b/") || strings.Contains(got.Reason, "<recipe>") {
 			t.Errorf("%s: reason carries a path or a placeholder: %q", tc.name, got.Reason)
