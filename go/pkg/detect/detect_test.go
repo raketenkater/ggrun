@@ -124,7 +124,7 @@ GPU1:
 	deviceName         = llvmpipe (LLVM 17.0.6, 256 bits)
 `
 
-	gpus := parseVulkanGPUs(summary)
+	gpus := parseVulkanGPUs(summary, 0)
 	if len(gpus) != 1 {
 		t.Fatalf("expected one non-software GPU, got %d: %#v", len(gpus), gpus)
 	}
@@ -142,7 +142,26 @@ GPU1:
 	}
 }
 
-func TestParseVulkanGPUsUsesConservativeIntegratedBudget(t *testing.T) {
+func TestParseVulkanGPUsSynthesizesUnifiedBudgetForAMDIntegrated(t *testing.T) {
+	summary := `GPU0:
+	apiVersion         = 1.3.250
+	driverVersion      = Mesa 24.0.0
+	deviceType         = PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU
+	deviceName         = AMD Radeon 8060S Graphics (RADV STRIX_HALO)
+`
+
+	gpus := parseVulkanGPUs(summary, 128076)
+	if len(gpus) != 1 {
+		t.Fatalf("expected one integrated GPU, got %d: %#v", len(gpus), gpus)
+	}
+	// 0.8 x 128076 = 102460: the unified-memory synthesis replaces the
+	// flat 2048 MB heuristic for AMD APUs. Fixed input -> deterministic.
+	if gpus[0].VRAMTotalMB != 102460 {
+		t.Fatalf("expected synthesized unified budget 102460, got %d", gpus[0].VRAMTotalMB)
+	}
+}
+
+func TestParseVulkanGPUsKeepsConservativeBudgetForIntelIntegrated(t *testing.T) {
 	summary := `GPU0:
 	apiVersion         = 1.3.250
 	driverVersion      = Mesa 24.0.0
@@ -150,12 +169,45 @@ func TestParseVulkanGPUsUsesConservativeIntegratedBudget(t *testing.T) {
 	deviceName         = Intel(R) Iris(R) Xe Graphics
 `
 
-	gpus := parseVulkanGPUs(summary)
+	// Intel iGPUs are aperture-capped, not unified-memory SoCs: synthesis
+	// must NOT fire even with large system RAM. Fixed input -> deterministic.
+	gpus := parseVulkanGPUs(summary, 65536)
 	if len(gpus) != 1 {
 		t.Fatalf("expected one integrated GPU, got %d: %#v", len(gpus), gpus)
 	}
 	if gpus[0].VRAMTotalMB != 2048 {
-		t.Fatalf("expected conservative integrated budget, got %d", gpus[0].VRAMTotalMB)
+		t.Fatalf("expected conservative Intel budget 2048, got %d", gpus[0].VRAMTotalMB)
+	}
+}
+
+func TestParseVulkanGPUsFallsBackToHeuristicWhenRAMUnavailable(t *testing.T) {
+	summary := `GPU0:
+	apiVersion         = 1.3.250
+	driverVersion      = Mesa 24.0.0
+	deviceType         = PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU
+	deviceName         = AMD Radeon 8060S Graphics (RADV STRIX_HALO)
+`
+
+	// RAM read failure (0) must leave the conservative 2048 MB heuristic in
+	// place rather than a zero-VRAM GPU.
+	gpus := parseVulkanGPUs(summary, 0)
+	if len(gpus) != 1 {
+		t.Fatalf("expected one integrated GPU, got %d: %#v", len(gpus), gpus)
+	}
+	if gpus[0].VRAMTotalMB != 2048 {
+		t.Fatalf("expected heuristic fallback 2048, got %d", gpus[0].VRAMTotalMB)
+	}
+}
+
+func TestSynthesizeIntegratedVRAMMB(t *testing.T) {
+	if got := synthesizeIntegratedVRAMMB(128076); got != 102460 {
+		t.Fatalf("128076 MB RAM: expected 102460 MB, got %d", got)
+	}
+	if got := synthesizeIntegratedVRAMMB(32768); got != 26214 {
+		t.Fatalf("32768 MB RAM: expected 26214 MB, got %d", got)
+	}
+	if got := synthesizeIntegratedVRAMMB(0); got != 0 {
+		t.Fatalf("zero RAM: expected 0, got %d", got)
 	}
 }
 
