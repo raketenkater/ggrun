@@ -55,6 +55,13 @@ func planLaunch(req *launchRequest, in planInputs) (*launchPlan, *planError) {
 		}
 	}
 
+	// The launch's own check, on the hardware view just taken: a --gpus index
+	// this machine (or inventory) does not have is rejected here, before the
+	// model is read or anything is planned. Shared, not a planPolicy field.
+	if gpuErr := requestedGPUsPlanError(caps, req); gpuErr != nil {
+		return nil, gpuErr
+	}
+
 	cfg, err := config.Load()
 	if err != nil {
 		return nil, &planError{Code: 2, Message: fmt.Sprintf("Error loading config: %v", err), Err: err}
@@ -135,6 +142,15 @@ func planLaunch(req *launchRequest, in planInputs) (*launchPlan, *planError) {
 	// way to see why is to compare this between two runs.
 	plan.LaunchScope = claudeLaunchLogScope(req, model, be, plan.ServerArgv)
 	return plan, nil
+}
+
+// requestedGPUsPlanError is validateRequestedGPUs as a planError, with the text
+// and exit status cmdLaunch gives the same input: "Error: <message>", exit 1.
+func requestedGPUsPlanError(caps *detect.Capabilities, req *launchRequest) *planError {
+	if err := validateRequestedGPUs(caps, req); err != nil {
+		return &planError{Code: 1, Message: fmt.Sprintf("Error: %v", err), Err: err}
+	}
+	return nil
 }
 
 // launchPlan is planLaunch's result.
