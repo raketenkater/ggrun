@@ -184,3 +184,9 @@ func TestLoadCatalogRejectsBadEncodingRequirements(t *testing.T) {
 		})
 	}
 }
+
+func TestEncodingNamesFollowTheShippedCatalog(t *testing.T) {
+	if got, want := EncodingNames(), loadedCatalog.encodingNames(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("EncodingNames() = %v, catalog says %v", got, want)
+	}
+}
