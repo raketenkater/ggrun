@@ -652,6 +652,42 @@
     "stderr": "[inventory] planning against 1 GPU(s) from inventories/gpu12.json (planning only; this host's GPUs are not detected or queried; the backend binary and the model reader still run, and this host's cached measurements are used)\n[placement] context fit: 1048576 tokens, 4 slot(s), KV q8_0 on cpu (memory-resident; model/policy context cap reached)\n[dry-run] could not read the size of Claude session 7a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d on this machine; a launch plans the same context without it, and stops with an error after the server starts if no resumable record of the session exists here\n"
   },
   {
+    "case": "claude-resume/long-ctx/gpu12/direct-ctx-4-slots",
+    "args": [
+      "models/Synthetic-Dense-8B-1M-Q4_K_M.gguf",
+      "--server-bin",
+      "backend/llama-server",
+      "--inventory",
+      "inventories/gpu12.json",
+      "--claude-code",
+      "--ctx",
+      "4145152",
+      "--parallel",
+      "4"
+    ],
+    "exit_code": 1,
+    "stdout": "",
+    "stderr": "[inventory] planning against 1 GPU(s) from inventories/gpu12.json (planning only; this host's GPUs are not detected or queried; the backend binary and the model reader still run, and this host's cached measurements are used)\nError computing placement: ERROR: Model does not fit in system memory.\n  Model weights:          3919MB\n  CUDA overhead (1 GPU): 1024MB\n  Compute buffers (1):   0MB\n  KV cache (ctx=4145152):      275264MB\n  Host runtime buffers:   0MB\n  -----------------------------\n  Total needed:          280207MB\n  Available (system memory):        122170MB\n  Shortfall:             158037MB\n\n  Max safe context at this memory: --ctx-size 1765300\n  Or use a smaller quantization / model.\n"
+  },
+  {
+    "case": "claude-resume/long-ctx/gpu12/direct-ctx-1-slot",
+    "args": [
+      "models/Synthetic-Dense-8B-1M-Q4_K_M.gguf",
+      "--server-bin",
+      "backend/llama-server",
+      "--inventory",
+      "inventories/gpu12.json",
+      "--claude-code",
+      "--ctx",
+      "1036288",
+      "--parallel",
+      "1"
+    ],
+    "exit_code": 1,
+    "stdout": "[dry-run] non-resident, ctx 1036288 total / 1036288 per agent, kv gpu/q8_0, batch 2048/512, parallel 1, bottleneck memory admission (incomplete-compute-evidence)\n[dry-run] calculated 25 candidates (0 feasible, 0 exact): batch 32..8192, ubatch 32..2048, parallel 1..1, 1 topology shape(s)\n[dry-run] CUDA0 main/layers free   5844 - model      0 - KV 68816 - graph/runtime  1024 = slack -63996 MiB [missing-compute-measurement]\n[dry-run] host free 122880 - required 3919 = slack 118961 MiB (reclaimable weights 0 MiB) [gguf-and-probe-estimate]\n",
+    "stderr": "[inventory] planning against 1 GPU(s) from inventories/gpu12.json (planning only; this host's GPUs are not detected or queried; the backend binary and the model reader still run, and this host's cached measurements are used)\n[dry-run] plan does not fit as estimated: CUDA0 KV 68816 MiB, slack -63996 MiB. Lower --ctx-size or use --kv-placement cpu.\n"
+  },
+  {
     "case": "claude-resume/long-ctx/gpu12-ram16",
     "args": [
       "models/Synthetic-Dense-8B-1M-Q4_K_M.gguf",
