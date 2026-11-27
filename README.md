@@ -142,7 +142,7 @@ No other runtime was measured in this round, so the table makes no comparison. R
 
 ## Large models on one host
 
-All rows used the full host above (3 GPUs, 212 GiB), Linux, models on an NTFS HDD and `--claude-code`. They ran on `main` after v3.2.12, which is not yet in a release. Each row is one run. Tasks are Claude Code repository fixes checked by the repositories' unchanged unit tests. Prefill and decode here are medians from the backend log over the session's requests.
+All rows used the full host above (3 GPUs, 212 GiB), Linux, models on an NTFS HDD and `--claude-code`. They ran on `main` between v3.2.12 and v3.2.13. Each row is one run. Tasks are Claude Code repository fixes checked by the repositories' unchanged unit tests. Prefill and decode here are medians from the backend log over the session's requests.
 
 | Model (quant, size) | Date, build | Ready | Tasks (s) | Context | Prefill / decode tok/s |
 |---|---|---:|---|---:|---|
@@ -153,7 +153,7 @@ All rows used the full host above (3 GPUs, 212 GiB), Linux, models on an NTFS HD
 | same, relaunch | 2026-10-23, v3.2.12-23-ge546a94 | 1,621 s | 6,521 (11 tests), correct | 1,048,576 (4 slots) | see below |
 
 - **GLM-5.3 (mapped experts).** At 222 GiB the model is larger than the 212 GiB of RAM, so its experts stay mapped from disk. Before #99, on 2026-10-24, `memory.high` throttled the page cache that held those experts. The first task timed out at 3,600 s, with prefill at 0.13-0.44 tok/s and decode at 0.32 tok/s. Since #102, startup probes wait for idle slots, and a slow canary marks the profile degraded instead of rejecting the launch.
-- **MiniMax-M3.1-Flash.** It needs llama.cpp PR #31192, which was unmerged on 2026-10-28. The PR is registered with `ggrun backend add` and selected with `--backend`. That backend put its KV cache on the CPU and left the RTX 3090 Ti unused, so its speed says little about the model.
+- **MiniMax-M3.1-Flash.** This run used llama.cpp PR #31192, registered with `ggrun backend add` and selected with `--backend`. That backend put its KV cache on the CPU and left the RTX 3090 Ti unused, so its speed says little about the model. #31192 was later closed unmerged; mainline llama.cpp merged MiniMax-M3.1 support in #32301 (2026-11-15). ggrun has not been tested with it.
 - **DeepSeek V4.1 Flash (paged lookup tables).** It has n-gram lookup tables (Engram), 195 GiB of the 366 GiB. ggrun keeps those paged from disk while the execution weights stay resident.
   - Prefill of new text ran at ~3.2-4.0 tok/s, limited by random reads from the HDD. Repeated prompts ran at ~16 tok/s.
   - Decode was 1.6-8.2 tok/s on 8-token test replies. Agent-length decode was not measured.
@@ -171,6 +171,7 @@ A smaller new model went through the same download-to-agent flow. Nanbeige4.3-33
 | Linux + NVIDIA | Most tested. ik_llama.cpp CUDA or mainline CUDA, cgroup containment (needs systemd), bandwidth profile. GPUs below compute capability 7.5 get Vulkan by default. |
 | Linux AMD / Intel | Mainline llama.cpp through Vulkan. No ROCm. AMD APU unified memory is broken ([#49](https://github.com/raketenkater/ggrun/issues/49)). |
 | CPU only | Works; the CPU rows above show what that means for agent tasks. |
+| GPUs from more than one vendor | Not supported yet. When an NVIDIA GPU is found, GPUs from other vendors are ignored. |
 | Windows | Installer and CPU serving are verified in CI. CUDA comes from upstream llama.cpp prebuilts or a source build, not a ggrun bundle. GPU serving is unverified. There is no memory containment (the backend is stopped when ggrun exits), and fork builds are disabled. |
 | Docker | `docker/` has CPU, CUDA and Vulkan images. They set `GGRUN_SCOPE_MODE=none`: no cgroup containment, but pre-launch admission still applies; use `docker run --memory` as the hard limit. No image is built in CI, and the GPU images have not been verified in a container. |
 
@@ -182,7 +183,7 @@ A smaller new model went through the same download-to-agent flow. Nanbeige4.3-33
 - `--calibrate auto` runs a live comparison with a 20-minute budget. Models that take ~20 minutes to load never get a measured improvement. On DeepSeek V4.1 the auto budget skipped its own best candidate (`-ub 128`). That candidate later measured +29% warm prefill (20.1-20.7 vs 15.6-16.0 tok/s, short samples, no task run).
 - Large models from an HDD are slow to start (1,621-3,372 s to ready in the table above) and slow to prefill cold.
 - The downloader picks the largest quant that fits VRAM without reserving context. Nanbeige4.3-33B Q8_0 got 34,816 tokens on 1 slot.
-- MiniMax-M3.1-Flash needs an unmerged llama.cpp PR (#31192) registered as a custom backend. On that run the backend did not follow ggrun's plan (KV cache on CPU, RTX 3090 Ti unused), and admission did not catch it.
+- The MiniMax-M3.1-Flash run used a custom backend built from a llama.cpp PR. That backend did not follow ggrun's plan (KV cache on CPU, RTX 3090 Ti unused), and admission did not catch it.
 - Speculative decoding was slower on code in the published test; it is opt-in.
 - Claude Code is a separate install, and the local model's quality limits how well tool use works.
 
@@ -202,13 +203,14 @@ ggrun claude list | resume                 # recorded Claude Code sessions
 ggrun update                               # ggrun and backends, with rollback
 ```
 
-Every option is listed in [docs/usage.md](docs/usage.md).
+Every flag and environment variable is listed in [docs/reference.md](docs/reference.md); [docs/usage.md](docs/usage.md) explains them.
 
 ## Documentation
 
 [Install](docs/install.md) ·
 [Getting started](docs/getting-started.md) ·
 [Usage](docs/usage.md) ·
+[Reference](docs/reference.md) ·
 [Troubleshooting](docs/troubleshooting.md) ·
 [Model recommendations](docs/model-recommendations.md) ·
 [Fork backends](docs/fork-backends.md) ·

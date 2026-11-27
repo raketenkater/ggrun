@@ -13,10 +13,11 @@ ggrun backend install minimax-m3
 ggrun backend install laguna
 ```
 
-A recipe contains a Git repository, branch, immutable commit, backend tag and
-GGUF `general.architecture`. ggrun clones it under `.src/fork-*`, builds only
-`llama-server`, registers the resulting binary and records the exact commit in
-`.config/backends.json`. Later launches of a matching model route automatically.
+Recipes are data embedded in the binary (`go/pkg/backends/catalog.json`). A
+recipe contains a Git repository, branch, immutable commit, backend tag, GGUF
+`general.architecture` and optional patch files pinned by sha256. ggrun clones
+it under `.src/fork-*`, builds only `llama-server`, registers the resulting
+binary and records the exact commit in `.config/backends.json`. Later launches of a matching model route automatically.
 
 The HY3 recipe currently maps `hy_v3` to the reviewed `noonr48/ik_llama-hy3`
 `hy3-support` revision. Because this is an IK fork, ggrun preserves the IK flag
@@ -33,16 +34,18 @@ name architectures explicitly:
 ggrun backend install hy3 --cuda-arch "86;89"
 ```
 
-The MiniMax-M3 recipe pins the open preliminary-support branch revision that
-includes its dedicated structured tool-call parser. Its architecture route is
-`minimax-m3`. Sparse attention is not implemented in that revision, so it uses
-the mathematically correct dense fallback and remains an experimental backend
-until the 60k agent/workflow farm passes on the target machine.
+The MiniMax-M3 recipe pins a preliminary-support branch revision that includes
+its dedicated structured tool-call parser (its llama.cpp PR was closed
+unmerged). Its architecture route is `minimax-m3`. Sparse attention is not implemented in that revision, so it uses
+the mathematically correct dense fallback and remains an experimental backend.
 
-The Laguna recipe pins Poolside's open upstream `llama.cpp` PR revision and
-routes GGUFs with `general.architecture=laguna` to that isolated build. Mainline
-does not support Laguna until that PR lands. DFlash GGUFs are companion
-speculators rather than standalone target models and are not offered in the TUI.
+The Laguna recipe pins Poolside's own `llama.cpp` fork, which also loads the
+DFlash drafter, and routes GGUFs with `general.architecture=laguna` to that
+isolated build. The `laguna-upstream-pr` recipe pins the upstream PR revision
+instead; it serves the target model but cannot load the drafter. That PR has
+since merged into mainline llama.cpp.
+DFlash GGUFs are companion speculators rather than standalone target models and
+are not offered in the TUI.
 
 If no reviewed recipe exists, a launch that cannot load the GGUF architecture
 searches open `ggml-org/llama.cpp` pull requests for that architecture name and
