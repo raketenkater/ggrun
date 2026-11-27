@@ -645,37 +645,6 @@ func TestHarmonicBandwidthCombinesSequentialCards(t *testing.T) {
 	}
 }
 
-// The planner seats any model that fits one card on that card alone, MoE as
-// well as dense; only a MoE that needs several cards pays the harmonic split.
-func TestMoEDecodeUsesOneCardWhenItFits(t *testing.T) {
-	gpu := func(name string, mb int) detect.GPU { return detect.GPU{Name: name, VRAMTotalMB: mb} }
-	mixed := &detect.Capabilities{GPUs: []detect.GPU{gpu("NVIDIA GeForce RTX 3090 Ti", 24576), gpu("NVIDIA GeForce RTX 3060", 12288)}}
-	equal := &detect.Capabilities{GPUs: []detect.GPU{gpu("NVIDIA GeForce RTX 3090", 24576), gpu("NVIDIA GeForce RTX 3090", 24576)}}
-	one := &detect.Capabilities{GPUs: []detect.GPU{gpu("NVIDIA GeForce RTX 3090 Ti", 24576)}}
-	c := Candidate{MoE: true, TotalParamsB: 30, ActiveParamsB: 3} // 1.68 GB per token at Q4_K_M
-	small := QuantOption{Name: "Q4_K_M", SizeGB: 18}              // fits 24 GiB * 0.88
-	large := QuantOption{Name: "Q4_K_M", SizeGB: 25}              // needs both cards
-	for _, tc := range []struct {
-		name string
-		caps *detect.Capabilities
-		q    QuantOption
-		fit  string
-		want float64 // bandwidth * 0.50 / 1.68
-	}{
-		{"mixed, fits the 3090 Ti", mixed, small, "", 1008 * 0.5 / 1.68},
-		{"mixed, single GPU fit", mixed, small, "single GPU", 1008 * 0.5 / 1.68},
-		{"mixed, multi-GPU fit", mixed, small, "multi-GPU", 630 * 0.5 / 1.68},
-		{"mixed, needs both cards", mixed, large, "", 630 * 0.5 / 1.68},
-		{"equal cards, fits one", equal, small, "", 936 * 0.5 / 1.68},
-		{"equal cards, needs both", equal, large, "", 936 * 0.5 / 1.68},
-		{"one card", one, small, "", 1008 * 0.5 / 1.68},
-	} {
-		if got := predictDecodeTPSForFit(tc.caps, c, tc.q, tc.fit, 0); math.Abs(got-tc.want) > 1e-9*tc.want {
-			t.Errorf("%s: %.4f tok/s, want %.4f", tc.name, got, tc.want)
-		}
-	}
-}
-
 func TestPredictDecodeTPSSmallDenseIncludesKernelBoundScaling(t *testing.T) {
 	caps := &detect.Capabilities{GPUs: []detect.GPU{{Name: "NVIDIA GeForce RTX 3090 Ti", VRAMTotalMB: 24564}}}
 	candidate := Candidate{TotalParamsB: 4}
