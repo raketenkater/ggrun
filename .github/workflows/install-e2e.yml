@@ -238,6 +238,14 @@ jobs:
           backend_scopes() { find "$ucg" -maxdepth 3 -type d -name 'ggrun-backend-*.scope' 2>/dev/null || true; }
           scope_pids() { local sc; for sc in $(backend_scopes); do cat "$sc/cgroup.procs" 2>/dev/null || true; done; }
           port_pids() { ss -ltnpH "sport = :$1" 2>/dev/null | grep -o 'pid=[0-9]*' | cut -d= -f2 | sort -u || true; }
+          # pid:comm:ppid of every process in a backend scope.
+          scope_members() {
+            local p out=""
+            for p in $(scope_pids); do
+              out="$out$p:$(cat "/proc/$p/comm" 2>/dev/null):$(awk '/^PPid:/{print $2}' "/proc/$p/status" 2>/dev/null) "
+            done
+            printf '%s' "${out:-none}"
+          }
           answering() { curl -fs --max-time 1 "http://127.0.0.1:$1/health" >/dev/null 2>&1; }
           proc_line() {
             [ -r "/proc/$1/status" ] || return 0
@@ -325,7 +333,7 @@ jobs:
           # shellcheck disable=SC1091
           . "$RUNNER_TEMP/unit-diag.sh"
           table="$RUNNER_TEMP/stop-during-load.tsv"
-          printf 'iter\tmoment\tport\tstop_s\thealthy_at_stop\tdown_10s\tdown_30s\tdown_after_s\tsurvivors\tlast_launcher_line\n' > "$table"
+          printf 'iter\tmoment\tport\tstop_s\thealthy_at_stop\tdown_10s\tdown_30s\tdown_after_s\tscope_before_stop\tsurvivors\tlast_launcher_line\n' > "$table"
           print_table() {
             echo "=== stop-during-load summary"
             column -t -s "$(printf '\t')" "$table" || cat "$table"
@@ -373,6 +381,7 @@ jobs:
                 done ;;
             esac
             healthy=no; answering "$port" && healthy=yes
+            before="$(scope_members)"
             t_stop="$(date +%s.%N)"
             systemctl --user stop ggrun || true
             t_stopped="$(date +%s.%N)"
@@ -387,8 +396,7 @@ jobs:
                 break
               fi
               if [ "$down10" = no ] && [ "$survivors" = - ] && awk -v e="$el" 'BEGIN{exit !(e > 10)}'; then
-                survivors="$(for p in $(port_pids "$port") $(scope_pids); do printf '%s:%s ' "$p" "$(cat "/proc/$p/comm" 2>/dev/null)"; done)"
-                survivors="${survivors:-none}"
+                survivors="$(scope_members)"
                 echo "iteration $i ($moment): still answering 10s after stop"
                 unit_diag "$port" "$since"
               fi
@@ -402,8 +410,8 @@ jobs:
             last="$(journalctl --user -u ggrun -o short-unix --no-pager 2>/dev/null \
               | awk -v s="$since" -v t="$t_stop" '$1+0 >= s && $1+0 < t { sub(/^[^ ]+ [^ ]+ [^ ]+: /, ""); if ($0 ~ /^\[/) l=$0 } END { print l }' \
               | tr '\t' ' ' | cut -c1-90 || true)"
-            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$i" "$moment" "$port" "$stop_s" "$healthy" "$down10" "$down30" \
-              "$down_after" "$survivors" "${last:-<none>}" >> "$table"
+            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$i" "$moment" "$port" "$stop_s" "$healthy" "$down10" "$down30" \
+              "$down_after" "$before" "$survivors" "${last:-<none>}" >> "$table"
             cleanup_backends "$port"
           done
 
