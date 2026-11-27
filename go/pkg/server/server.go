@@ -330,6 +330,7 @@ func StartWithTimeoutToEnv(args []string, port int, timeout time.Duration, termO
 
 // StartWithTimeoutToOptions is StartWithTimeoutTo with explicit launch options.
 func StartWithTimeoutToOptions(args []string, port int, timeout time.Duration, termOut, termErr io.Writer, opts StartOptions) (*Process, error) {
+	blockIfStopping()
 	args = LoadModeArgs(args)
 	ctx, cancel := context.WithCancel(context.Background())
 	scopeUnit := ""
@@ -442,6 +443,7 @@ func StartWithTimeoutToOptions(args []string, port int, timeout time.Duration, t
 			fmt.Fprintln(os.Stderr, tailLines(logBuf.String(), 20))
 		}
 		p.Stop()
+		blockIfStopping()
 		return p, fmt.Errorf("server not ready: %w", failure)
 	}
 	live.Store(true) // backend is up — stream its logs from here on

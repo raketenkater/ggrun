@@ -9,6 +9,8 @@ func installSignalGuard() {}
 // OwnShutdownSignals is a no-op on Windows.
 func OwnShutdownSignals() {}
 
+func blockIfStopping() {}
+
 func trackLive(*Process) {}
 
 func untrackLive(*Process) {}

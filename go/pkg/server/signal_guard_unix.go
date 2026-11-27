@@ -17,9 +17,10 @@ import (
 // same signal. SIGINT is left alone: Ctrl+C has its own owners (claude_resume).
 var guard struct {
 	sync.Mutex
-	ch      chan os.Signal
-	claimed bool
-	live    map[*Process]struct{}
+	ch       chan os.Signal
+	claimed  bool
+	stopping bool
+	live     map[*Process]struct{}
 }
 
 func installSignalGuard() {
@@ -44,6 +45,7 @@ func runSignalGuard(ch chan os.Signal) {
 		guard.Unlock()
 		return
 	}
+	guard.stopping = true
 	live := make([]*Process, 0, len(guard.live))
 	for p := range guard.live {
 		live = append(live, p)
@@ -74,6 +76,19 @@ func OwnShutdownSignals() {
 	guard.claimed = true
 	if guard.ch != nil {
 		signal.Stop(guard.ch)
+	}
+}
+
+// blockIfStopping parks a caller once the guard is stopping backends for a
+// signal: no new backend may start, and a launch whose readiness failed
+// because the guard stopped it must not race on to a retry or its own exit
+// code. The guard ends the process with the signal.
+func blockIfStopping() {
+	guard.Lock()
+	stopping := guard.stopping
+	guard.Unlock()
+	if stopping {
+		select {}
 	}
 }
 
