@@ -4512,8 +4512,10 @@ func nextUBatchForDeficit(current, allocMB, deficitMB int) (int, bool) {
 // allocMB is the measured failed component; deficitMB is how far it exceeded
 // the guarded device budget. Compute recovery skips ubatch rungs disproved by
 // the measurement. Weight recovery removes enough experts from the exact
-// failed device to cover the deficit and jitter margin.
-func DerateCUDAOOMArgsForDeficit(args []string, model *ModelProfile, caps *detect.Capabilities, device, allocMB, deficitMB int, isComputeBuffer bool) ([]string, *CacheEntry, bool) {
+// failed device to cover the deficit and jitter margin. backendTag is the
+// launch's device dialect, the same tag the primary placement emitted -ot
+// with, so the rebuilt override keeps naming the backend's own devices.
+func DerateCUDAOOMArgsForDeficit(args []string, model *ModelProfile, caps *detect.Capabilities, backendTag string, device, allocMB, deficitMB int, isComputeBuffer bool) ([]string, *CacheEntry, bool) {
 	if model == nil || model.NumLayers <= 0 || allocMB <= 0 {
 		return nil, nil, false
 	}
@@ -4574,7 +4576,7 @@ func DerateCUDAOOMArgsForDeficit(args []string, model *ModelProfile, caps *detec
 	}
 
 	newArgs := append([]string(nil), args...)
-	newArgs[otIdx+1] = buildOTStringFromAssignments(assignments, nil, model.NumLayers, "")
+	newArgs[otIdx+1] = buildOTStringFromAssignments(assignments, nil, model.NumLayers, backendTag)
 	setOrAppendArg(&newArgs, "--n-cpu-moe", strconv.Itoa(currentNCPUMoE(args)+actualDrop))
 
 	entry := cacheEntryFromArgs(newArgs, assignments)
