@@ -34,6 +34,7 @@ import (
 	"github.com/raketenkater/ggrun/pkg/controller"
 	"github.com/raketenkater/ggrun/pkg/daemon"
 	"github.com/raketenkater/ggrun/pkg/detect"
+	"github.com/raketenkater/ggrun/pkg/devicelist"
 	"github.com/raketenkater/ggrun/pkg/download"
 	"github.com/raketenkater/ggrun/pkg/gguf"
 	"github.com/raketenkater/ggrun/pkg/libhub"
@@ -641,10 +642,11 @@ func cmdDetect(args []string) {
 	flags := flag.NewFlagSet("detect", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
 	flags.Usage = func() {
-		fmt.Fprintln(os.Stderr, "Usage: ggrun detect [--bandwidth]")
+		fmt.Fprintln(os.Stderr, "Usage: ggrun detect [--bandwidth | --pci]")
 		flags.PrintDefaults()
 	}
 	measureBandwidth := flags.Bool("bandwidth", false, "measure and cache host/CUDA transfer bandwidth")
+	listPCI := flags.Bool("pci", false, "print the operating system's PCI GPU inventory (Linux) instead of the detected GPUs")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return
@@ -652,13 +654,28 @@ func cmdDetect(args []string) {
 		os.Exit(2)
 	}
 	if flags.NArg() != 0 {
-		fmt.Fprintln(os.Stderr, "Usage: ggrun detect [--bandwidth]")
+		fmt.Fprintln(os.Stderr, "Usage: ggrun detect [--bandwidth | --pci]")
 		os.Exit(2)
+	}
+	if *listPCI {
+		displays, err := detect.ReadPCIDisplays("/")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		data, _ := json.MarshalIndent(displays, "", "  ")
+		fmt.Println(string(data))
+		return
 	}
 	caps, err := detect.Detect()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
+	}
+	// GGRUN_EXPERIMENTAL_AMD=1 only: name every GPU the OS lists that ggrun
+	// cannot select for a launch, with the reason. The JSON below is unchanged.
+	for _, note := range detect.UnusableGPUNotes(caps, detect.HostPCIDisplays()) {
+		fmt.Fprintf(os.Stderr, "[detect] %s\n", note)
 	}
 	if *measureBandwidth {
 		fmt.Fprintln(os.Stderr, "[detect] measuring host memcpy and pinned CUDA transfer bandwidth...")
@@ -9772,30 +9789,17 @@ func backendGPUCapable(binPath string) (capable, probed bool) {
 	if binPath == "" {
 		return false, false
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	out, err := exec.CommandContext(ctx, binPath, "--list-devices").CombinedOutput()
-	if ctx.Err() != nil {
-		return false, false
+	// The fallback runs only for the known unsupported-option response, not
+	// crashes, driver errors or an unsuccessful device enumeration; one 10 s
+	// bound covers both.
+	listing := devicelist.Run(devicelist.Probe{Binary: binPath, Timeout: 10 * time.Second, BufferFallback: true})
+	switch {
+	case listing.Grade == devicelist.GradeNames:
+		return backendGPUListing(listing.Output, "available buffer types:")
+	case listing.Grade == devicelist.GradeFull && listing.Err == nil:
+		return backendGPUListing(listing.Output, "available devices:")
 	}
-	if err == nil {
-		return backendGPUListing(string(out), "available devices:")
-	}
-	// Fall back only for the known unsupported-option response, not crashes,
-	// driver errors or an unsuccessful device enumeration. The deliberately
-	// invalid buffer makes argument parsing stop before model/server startup.
-	exitErr, exited := err.(*exec.ExitError)
-	if !exited || exitErr.ExitCode() != 1 || !strings.Contains(strings.ToLower(string(out)), "unknown argument: --list-devices") {
-		return false, false
-	}
-	const override = "ggrun_probe=__ggrun_invalid_buffer__"
-	out, err = exec.CommandContext(ctx, binPath, "--override-tensor", override).CombinedOutput()
-	exitErr, exited = err.(*exec.ExitError)
-	if ctx.Err() != nil || !exited || exitErr.ExitCode() != 1 ||
-		!strings.Contains(strings.ToLower(string(out)), "invalid tensor buffer type override: "+override) {
-		return false, false
-	}
-	return backendGPUListing(string(out), "available buffer types:")
+	return false, false
 }
 
 // Read only device/buffer entries, never CUDA/Vulkan examples in later help.

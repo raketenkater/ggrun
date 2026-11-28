@@ -6,7 +6,6 @@ import (
 	"io"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -20,6 +19,7 @@ import (
 	"github.com/raketenkater/ggrun/pkg/claudeauto"
 	"github.com/raketenkater/ggrun/pkg/config"
 	"github.com/raketenkater/ggrun/pkg/detect"
+	"github.com/raketenkater/ggrun/pkg/devicelist"
 	"github.com/raketenkater/ggrun/pkg/gguf"
 	"github.com/raketenkater/ggrun/pkg/libhub"
 	"github.com/raketenkater/ggrun/pkg/placement"
@@ -642,15 +642,23 @@ func helpHasExactFlag(help, flag string) bool {
 	return false
 }
 
+// claudeReviewerListDevices lists the reviewer backend's devices under the
+// reviewer's own environment. The listing is bounded (it had no bound before)
+// and shared with any identical listing earlier in this process.
 func claudeReviewerListDevices(binary string, env []string) (string, error) {
 	args := []string{binary, "--list-devices"}
-	cmd := exec.Command(args[0], args[1:]...)
-	cmd.Env = server.OverrideEnv(server.ChildEnv(os.Environ(), args), env)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return "", fmt.Errorf("probe %s --list-devices: %w: %s", binary, err, strings.TrimSpace(string(out)))
+	listing := devicelist.Run(devicelist.Probe{
+		Binary:  binary,
+		Env:     server.OverrideEnv(server.ChildEnv(os.Environ(), args), env),
+		Timeout: devicelist.DefaultTimeout,
+	})
+	if listing.TimedOut {
+		return "", fmt.Errorf("probe %s --list-devices: no answer within %s", binary, devicelist.DefaultTimeout)
 	}
-	return string(out), nil
+	if listing.Err != nil {
+		return "", fmt.Errorf("probe %s --list-devices: %w: %s", binary, listing.Err, strings.TrimSpace(listing.Output))
+	}
+	return listing.Output, nil
 }
 
 func claudeReviewerPhysicalGPU(caps *detect.Capabilities, index int) *detect.GPU {

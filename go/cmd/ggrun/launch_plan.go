@@ -155,7 +155,18 @@ func planLaunch(req *launchRequest, in planInputs) (*launchPlan, *planError) {
 		}
 		key, value := "", ""
 		if vkErr == nil {
-			key, value, vkErr = vulkanDeviceOrder(req, be, caps, listed)
+			// Never for an inventory plan: it reads nothing from this host.
+			if !fromInventory && in.ListVulkanUnder != nil && vulkanRestrictionApplies(be, caps, in.HostDisplays) {
+				var restrictNote string
+				key, value, restrictNote, vkErr = restrictedVulkanDeviceOrder(req, be, caps, listed, func(visible string) ([]listedDevice, error) {
+					return in.ListVulkanUnder(be.Path, visible)
+				})
+				if restrictNote != "" {
+					note(planNote{Stream: planStderr, Text: "[dry-run] " + restrictNote + "\n"})
+				}
+			} else {
+				key, value, vkErr = vulkanDeviceOrder(req, be, caps, listed)
+			}
 		}
 		if vkErr != nil {
 			note(planNote{Stream: planStderr, Text: fmt.Sprintf("[dry-run] warning: could not align Vulkan device order with detected GPUs: %v\n", vkErr)})
@@ -313,6 +324,11 @@ type planInputs struct {
 	Model          func(path string) (*placement.ModelProfile, error)
 	ResolveBackend func(req *launchRequest, model *placement.ModelProfile, caps *detect.Capabilities) *backendInfo
 	ListVulkan     func(path string) ([]listedDevice, error)
+	// HostDisplays and ListVulkanUnder serve the Vulkan restriction
+	// (vulkanRestrictionApplies): this host's PCI display inventory and a
+	// listing under a given GGML_VK_VISIBLE_DEVICES. Nil leaves today's order.
+	HostDisplays    func() []detect.PCIDisplay
+	ListVulkanUnder func(path, visible string) ([]listedDevice, error)
 	// Note receives each note when it happens, so a sink that prints keeps
 	// today's order against the lines the called functions print directly.
 	Note func(planNote)
@@ -320,13 +336,15 @@ type planInputs struct {
 
 func dryRunPlanInputs(note func(planNote)) planInputs {
 	return planInputs{
-		Policy:         dryRunPlanPolicy,
-		Detect:         detect.Detect,
-		Inventory:      loadInventory,
-		Model:          parseModel,
-		ResolveBackend: resolveLaunchBackend,
-		ListVulkan:     listVulkanDevices,
-		Note:           note,
+		Policy:          dryRunPlanPolicy,
+		Detect:          detect.Detect,
+		Inventory:       loadInventory,
+		Model:           parseModel,
+		ResolveBackend:  resolveLaunchBackend,
+		ListVulkan:      listVulkanDevices,
+		HostDisplays:    detect.HostPCIDisplays,
+		ListVulkanUnder: listVulkanDevicesUnder,
+		Note:            note,
 	}
 }
 
