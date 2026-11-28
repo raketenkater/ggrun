@@ -560,3 +560,78 @@ func TestContainmentReplanDoesNotRestoreTheRefusedConfig(t *testing.T) {
 		t.Fatalf("the containment re-plan restored the saved config: err=%v", err)
 	}
 }
+
+// A MoE record saved before it carried a backend tag or an -ot string is
+// replayed from its GPU assignments. The device names must follow the
+// launch's dialect: Vulkan on a Vulkan backend, today's literal CUDA names on
+// CUDA, and no replay at all when the dialect is unknown.
+func TestLegacyVerifiedReplayNamesTheLaunchBackendDevices(t *testing.T) {
+	ffn := `ffn_((gate_up|up_gate|gate|up|down)_(ch|)exps|(gate_inp|gate|up|down)_shexp|gate_inp|gate_tid2eid|exp_probs_b)`
+	for _, tc := range []struct {
+		tag    string
+		want   string
+		reused bool
+	}{
+		{"llama", `blk\.(0|1)\.` + ffn + `.*=CUDA0,blk\.(2)\.` + ffn + `.*=CUDA1,exps=CPU`, true},
+		{"vulkan", `blk\.(0|1)\.` + ffn + `.*=Vulkan0,blk\.(2)\.` + ffn + `.*=Vulkan1,exps=CPU`, true},
+		{"", "", false},
+	} {
+		t.Run("tag="+tc.tag, func(t *testing.T) {
+			dir := t.TempDir()
+			caps := &detect.Capabilities{
+				GPUs: []detect.GPU{
+					{Index: 0, Name: "3090", VRAMTotalMB: 24576, VRAMUsedMB: 512, BandwidthMBps: 31504},
+					{Index: 1, Name: "3060", VRAMTotalMB: 12288, VRAMUsedMB: 512, BandwidthMBps: 12000},
+				},
+				RAM: detect.RAMInfo{TotalMB: 131072, FreeMB: 120000},
+				CPU: detect.CPUInfo{Cores: 16},
+			}
+			model := &ModelProfile{
+				Path: filepath.Join(dir, "moe.gguf"), SizeBytes: 146 << 30, TotalSizeMB: 146 * 1024,
+				NumLayers: 43, IsMoE: true, NumExperts: 256,
+				ExpertBytes: int64(43 * 3289 * 1024 * 1024), NonExpertBytes: int64(7680 * 1024 * 1024),
+				ContextSize: 32768, EmbeddingLength: 4096, HeadCountKV: 1, KeyLength: 512, ValueLength: 512,
+				ExpertUsedCount: 6, ExpertFF: 2048, ModelArch: "llama",
+			}
+			opts := Options{
+				ContextSize: 8192, KVQuality: "low", KVPlacement: "cpu", Parallel: 1,
+				CacheDir: dir, BackendIdentity: "b", BackendTag: "llama", SWAFull: false,
+			}
+			first, err := Compute(caps, model, opts)
+			if err != nil || first.Type != MoEOffload {
+				t.Fatalf("first compute: type=%v err=%v", first.Type, err)
+			}
+			replay := opts
+			replay.BackendTag = tc.tag
+			key := NewCalibrationScopeKey(model, caps, replay, nil).String()
+			replay.VerifiedConfigScopeKey = key
+			vc := VerifiedConfigToRecord(key, model.Basename, first, "b", "/p", "", "")
+			vc.BackendTag, vc.OTString = "", ""
+			vc.GPUAssignments = []GPUAssignment{{CUDAIndex: 0, Start: 0, Count: 2}, {CUDAIndex: 1, Start: 2, Count: 1}}
+			if _, err := SaveVerifiedConfig(dir, vc); err != nil {
+				t.Fatalf("save: %v", err)
+			}
+			got, err := Compute(caps, model, replay)
+			if err != nil {
+				t.Fatalf("replay compute: %v", err)
+			}
+			if got.VerifiedConfigReused != tc.reused {
+				t.Fatalf("verified reuse = %v, want %v", got.VerifiedConfigReused, tc.reused)
+			}
+			if tc.reused && got.OTString != tc.want {
+				t.Fatalf("replayed -ot = %q\nwant %q", got.OTString, tc.want)
+			}
+		})
+	}
+}
+
+func TestRebuildOTStringFromAssignmentsKeepsARecordedTag(t *testing.T) {
+	caps := &detect.Capabilities{GPUs: []detect.GPU{{Index: 0, VRAMTotalMB: 24576}}}
+	vc := &VerifiedConfig{BackendTag: "vulkan", GPUAssignments: []GPUAssignment{{CUDAIndex: 0, Start: 0, Count: 1}}}
+	if ot, ok := rebuildOTStringFromAssignments(vc, caps, 4, "llama"); !ok || !strings.Contains(ot, "=Vulkan0,") {
+		t.Fatalf("recorded vulkan tag lost: ok=%v ot=%q", ok, ot)
+	}
+	if ot, ok := rebuildOTStringFromAssignments(&VerifiedConfig{}, caps, 4, ""); !ok || ot != "" {
+		t.Fatalf("record without assignments must stay a no-op: ok=%v ot=%q", ok, ot)
+	}
+}

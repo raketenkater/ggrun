@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/raketenkater/ggrun/pkg/detect"
@@ -400,12 +401,23 @@ func VerifiedConfigToRecord(scopeKey, modelBasename string, s *Strategy, backend
 
 // rebuildOTStringFromAssignments reconstructs the -ot flag from a saved
 // GPU-assignment layout when the exact OTString was not persisted (legacy
-// fallback; the modern save always writes OTString).
-func rebuildOTStringFromAssignments(vc *VerifiedConfig, caps *detect.Capabilities, numLayers int) string {
+// fallback; the modern save always writes OTString). The device names follow
+// the record's dialect, or, for a record saved before it carried one, the
+// launch's own dialect (launchTag, the value the primary placement uses). ok is
+// false when neither is known: the names would default to CUDA, which is wrong
+// on a Vulkan or ROCm backend, so the caller re-plans instead.
+func rebuildOTStringFromAssignments(vc *VerifiedConfig, caps *detect.Capabilities, numLayers int, launchTag string) (string, bool) {
 	if vc == nil || len(vc.GPUAssignments) == 0 || numLayers <= 0 {
-		return ""
+		return "", true
 	}
-	return buildOTStringFromAssignments(vc.GPUAssignments, caps.GPUs, numLayers, vc.BackendTag)
+	tag := strings.TrimSpace(vc.BackendTag)
+	if tag == "" {
+		tag = strings.TrimSpace(launchTag)
+	}
+	if tag == "" {
+		return "", false
+	}
+	return buildOTStringFromAssignments(vc.GPUAssignments, caps.GPUs, numLayers, tag), true
 }
 
 // verifiedConfigFreeVRAMStale revalidates the stale-plan free-VRAM guard: a
