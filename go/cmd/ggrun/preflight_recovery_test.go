@@ -43,7 +43,7 @@ func TestAllocationOOMOutcomePreservesExactRecoveryEvidence(t *testing.T) {
 
 func TestUnchangedComputeReplanMovesExpertBeforeLoweringUBatch(t *testing.T) {
 	model, caps, args, unchanged := preflightRecoveryFixture()
-	next, entry, method, ok := selectChangedPreflightRecovery(args, unchanged, model, caps, preflightOutcome{
+	next, entry, method, ok := selectChangedPreflightRecovery(args, unchanged, model, caps, "", preflightOutcome{
 		Device: 0, AllocMB: 2132, DeficitMB: 74, IsComputeBuffer: true,
 	})
 	if !ok || method != "expert-derate" {
@@ -60,7 +60,7 @@ func TestComputeRecoveryNeverRaisesDeratedUBatch(t *testing.T) {
 	args = replaceUBatchArg(args, 256)
 	candidate.UBatchSize = 512
 	candidate.NCPUMoE++
-	next, entry, method, ok := selectChangedPreflightRecovery(args, candidate, model, caps, preflightOutcome{
+	next, entry, method, ok := selectChangedPreflightRecovery(args, candidate, model, caps, "", preflightOutcome{
 		Device: 0, AllocMB: 2132, DeficitMB: 74, IsComputeBuffer: true,
 	})
 	if !ok || method != "expert-derate" || entry == nil || entry.NCPUMoE != 50 || !strings.Contains(effectiveMemoryArgsFingerprint(next), "ubatch=256") {
@@ -76,7 +76,7 @@ func TestComputeRecoveryLowersUBatchWhenFailedDeviceHasNoExpert(t *testing.T) {
 			break
 		}
 	}
-	next, entry, method, ok := selectChangedPreflightRecovery(args, nil, model, caps, preflightOutcome{
+	next, entry, method, ok := selectChangedPreflightRecovery(args, nil, model, caps, "", preflightOutcome{
 		Device: 1, AllocMB: 2132, DeficitMB: 74, IsComputeBuffer: true,
 	})
 	if !ok || method != "ubatch-derate" || entry == nil || entry.UBatchSize != 256 {
@@ -100,7 +100,7 @@ func TestComputeRecoveryJumpsUBatchByMeasuredDeficit(t *testing.T) {
 			break
 		}
 	}
-	next, entry, method, ok := selectChangedPreflightRecovery(args, nil, model, caps, preflightOutcome{
+	next, entry, method, ok := selectChangedPreflightRecovery(args, nil, model, caps, "", preflightOutcome{
 		Device: 0, AllocMB: 17495, AllocMBMeasured: true, DeficitMB: 12666, IsComputeBuffer: true,
 	})
 	if !ok || method != "ubatch-derate" || entry == nil || entry.UBatchSize != 64 {
@@ -134,7 +134,7 @@ func TestGLMContextNudgeCannotBeatFailedDeviceExpertRelief(t *testing.T) {
 		TensorSplit: []float64{0.29, 0.61, 0.10}, SplitMode: "layer",
 		OTString: ot, NCPUMoE: 41,
 	}
-	next, entry, method, ok := selectChangedPreflightRecovery(args, candidate, model, caps, preflightOutcome{
+	next, entry, method, ok := selectChangedPreflightRecovery(args, candidate, model, caps, "", preflightOutcome{
 		Device: 2, AllocMB: 4632, AllocMBMeasured: true, DeficitMB: 2524, IsComputeBuffer: true,
 	})
 	if !ok || method != "expert-derate" || entry == nil || entry.NCPUMoE != 42 {
@@ -168,7 +168,7 @@ func TestAutomaticContextFallbackTargetIsDeficitSizedAndExplicitContextIsImmutab
 	if target%1024 != 0 {
 		t.Fatalf("context fallback target was not rounded to 1024 tokens: %d", target)
 	}
-	if _, _, _, patched := applyMemoryRecoverySelection(autoReq, strategy, args, nil, model, caps, outcome); patched {
+	if _, _, _, patched := applyMemoryRecoverySelection(autoReq, strategy, args, nil, model, caps, "", outcome); patched {
 		t.Fatal("memory selection patched context without a full placement recompute")
 	}
 
@@ -183,7 +183,7 @@ func TestAutomaticContextFallbackTargetIsDeficitSizedAndExplicitContextIsImmutab
 		ContextSize: 65536, BatchSize: 2048, UBatchSize: 64, KVType: "q8_0", Parallel: 1,
 	}
 	if _, _, _, ok := applyMemoryRecoverySelection(
-		&launchRequest{CtxFlag: "262144"}, explicitStrategy, args, explicitCandidate, model, caps, outcome,
+		&launchRequest{CtxFlag: "262144"}, explicitStrategy, args, explicitCandidate, model, caps, "", outcome,
 	); ok {
 		t.Fatal("a re-plan candidate overrode an explicit context")
 	}
@@ -203,7 +203,7 @@ func TestFailedDeviceReliefNormalizesTensorSplitShares(t *testing.T) {
 
 func TestUnchangedWeightReplanMovesExpertLayer(t *testing.T) {
 	model, caps, args, unchanged := preflightRecoveryFixture()
-	next, entry, method, ok := selectChangedPreflightRecovery(args, unchanged, model, caps, preflightOutcome{
+	next, entry, method, ok := selectChangedPreflightRecovery(args, unchanged, model, caps, "", preflightOutcome{
 		Device: 1, AllocMB: 2500, DeficitMB: 74,
 	})
 	if !ok || method != "expert-derate" {
@@ -217,7 +217,7 @@ func TestUnchangedWeightReplanMovesExpertLayer(t *testing.T) {
 func TestComputeRecoveryMovesExpertBeforeChangedPackerLowersUBatch(t *testing.T) {
 	model, caps, args, candidate := preflightRecoveryFixture()
 	candidate.UBatchSize = 256
-	next, entry, method, ok := selectChangedPreflightRecovery(args, candidate, model, caps, preflightOutcome{
+	next, entry, method, ok := selectChangedPreflightRecovery(args, candidate, model, caps, "", preflightOutcome{
 		Device: 0, AllocMB: 2132, DeficitMB: 74, IsComputeBuffer: true,
 	})
 	if !ok || method != "expert-derate" || entry == nil || entry.NCPUMoE != 50 {
@@ -234,7 +234,7 @@ func TestSharedMemoryRecoveryAppliesLayerFirstStrategyAndArgsTogether(t *testing
 	candidate.UBatchSize = 256
 
 	next, nextArgs, method, ok := applyMemoryRecoverySelection(
-		nil, current, args, &candidate, model, caps,
+		nil, current, args, &candidate, model, caps, "",
 		preflightOutcome{Device: 0, AllocMB: 2132, DeficitMB: 1, IsComputeBuffer: true},
 	)
 	if !ok || method != "expert-derate" || next != current {
@@ -255,7 +255,7 @@ func TestSharedMemoryRecoveryKeepsCompleteCandidateArgs(t *testing.T) {
 	complete = append(complete, "-cram", "7777", "--ctx-checkpoints", "8")
 
 	next, nextArgs, method, ok := applyMemoryRecoverySelection(
-		nil, current, args, &candidate, model, caps,
+		nil, current, args, &candidate, model, caps, "",
 		preflightOutcome{Device: 0, AllocMB: 2132, DeficitMB: 1, IsComputeBuffer: true},
 		complete,
 	)
@@ -278,7 +278,7 @@ func TestEffectiveDuplicateOverrideForbidsIdenticalRetry(t *testing.T) {
 	}
 	args = append(args, "-ub", "64") // later user value remains authoritative
 	candidate.UBatchSize = 256
-	_, _, _, ok := selectChangedPreflightRecovery(args, candidate, model, caps, preflightOutcome{
+	_, _, _, ok := selectChangedPreflightRecovery(args, candidate, model, caps, "", preflightOutcome{
 		Device: 0, AllocMB: 2132, DeficitMB: 74, IsComputeBuffer: true,
 	})
 	if ok {
@@ -289,7 +289,7 @@ func TestEffectiveDuplicateOverrideForbidsIdenticalRetry(t *testing.T) {
 func TestNoGenericWeightLeverFailsClosed(t *testing.T) {
 	model := &placement.ModelProfile{NumLayers: 32}
 	args := []string{"llama-server", "-ub", "512"}
-	_, _, _, ok := selectChangedPreflightRecovery(args, nil, model, &detect.Capabilities{}, preflightOutcome{
+	_, _, _, ok := selectChangedPreflightRecovery(args, nil, model, &detect.Capabilities{}, "", preflightOutcome{
 		Device: 0, AllocMB: 1024, DeficitMB: 1,
 	})
 	if ok {
@@ -312,7 +312,7 @@ func TestGeneratedSWAFullIsWithdrawnBeforeSheddingWeights(t *testing.T) {
 	// Config-sourced: ExtraArgs carries it, OriginalArgs does not.
 	generated := &launchRequest{ExtraArgs: []string{"--swa-full"}}
 	_, nextArgs, method, ok := applyMemoryRecoverySelection(
-		generated, &placement.Strategy{UBatchSize: 512, NCPUMoE: 39}, baseArgs, nil, model, caps, outcome)
+		generated, &placement.Strategy{UBatchSize: 512, NCPUMoE: 39}, baseArgs, nil, model, caps, "", outcome)
 	if !ok || method != "swa-full-withdrawn" {
 		t.Fatalf("generated --swa-full was not withdrawn first: method=%q ok=%v", method, ok)
 	}
@@ -326,7 +326,7 @@ func TestGeneratedSWAFullIsWithdrawnBeforeSheddingWeights(t *testing.T) {
 	// Typed on the command line: never withdrawn, fall through to the ladder.
 	typed := &launchRequest{ExtraArgs: []string{"--swa-full"}, OriginalArgs: []string{"--swa-full"}}
 	_, _, method, _ = applyMemoryRecoverySelection(
-		typed, &placement.Strategy{UBatchSize: 512, NCPUMoE: 39}, baseArgs, nil, model, caps, outcome)
+		typed, &placement.Strategy{UBatchSize: 512, NCPUMoE: 39}, baseArgs, nil, model, caps, "", outcome)
 	if method == "swa-full-withdrawn" {
 		t.Fatal("an explicitly typed --swa-full must not be withdrawn")
 	}
