@@ -429,6 +429,10 @@ var hostPCIDisplays = detect.HostPCIDisplays
 
 // applyVulkanDeviceOrder runs vulkanDeviceOrderEnv for a launch and reports it.
 func applyVulkanDeviceOrder(req *launchRequest, be *backendInfo, caps *detect.Capabilities) {
+	if req != nil && req.vendorSelection != nil {
+		// An AMD selection exported its checked raw indexes already.
+		return
+	}
 	var listUnder func(string, string) (string, error)
 	if vulkanRestrictionApplies(be, caps, hostPCIDisplays) {
 		listUnder = listVulkanOutputUnder

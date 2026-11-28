@@ -39,10 +39,13 @@ const admissionRowsScopeVersion = "noncuda-v1"
 
 // admissionRowPrefix is the device-name prefix the oracle and the listing use
 // for a non-CUDA dialect, or "" for the CUDA-family dialects cudaDeviceIndex
-// already reads. Vulkan is the only one ggrun selects today.
+// already reads. ROCm is set only by an AMD --gpus selection (amd_select.go).
 func admissionRowPrefix(be *backendInfo) string {
 	if be != nil && strings.EqualFold(be.Dialect, "vulkan") {
 		return "Vulkan"
+	}
+	if be != nil && strings.EqualFold(be.Dialect, "rocm") {
+		return "ROCm"
 	}
 	return ""
 }
@@ -51,17 +54,41 @@ func admissionRowPrefix(be *backendInfo) string {
 // admission. The opt-in and the dialect are checked before the inventory is
 // read. Vulkan is the native API of no vendor group, so for it the design's
 // third condition (a device outside the primary group, or a backend API that
-// is not the primary group's) always holds; a ROCm dialect would have to add
-// that check. The answer does not depend on which GPUs caps holds, only that
-// it has some, so the detection-time and runtime capabilities agree.
+// is not the primary group's) always holds. ROCm is the AMD group's own API,
+// so it applies only with an AMD card beside a GPU of another vendor: caps
+// holds a GPU the inventory names AMD at its PCI address. The answer does not
+// depend on which other GPUs caps holds, so the detection-time and runtime
+// capabilities agree.
 func nonCUDAAdmissionApplies(be *backendInfo, caps *detect.Capabilities, inventory func() []detect.PCIDisplay) bool {
 	if be == nil || caps == nil || len(caps.GPUs) == 0 || inventory == nil || !detect.ExperimentalAMD() {
 		return false
 	}
-	if admissionRowPrefix(be) == "" {
+	prefix := admissionRowPrefix(be)
+	if prefix == "" {
 		return false
 	}
-	return inventoryGPUVendors(inventory()) > 1
+	inv := inventory()
+	if inventoryGPUVendors(inv) < 2 {
+		return false
+	}
+	return prefix != "ROCm" || capsHoldVendor(caps, inv, "amd")
+}
+
+// capsHoldVendor reports whether a GPU of caps is a card of vendor in the
+// inventory, matched by PCI address.
+func capsHoldVendor(caps *detect.Capabilities, inv []detect.PCIDisplay, vendor string) bool {
+	for _, g := range caps.GPUs {
+		address, ok := detect.CanonicalPCIAddress(g.PCIBusID)
+		if !ok {
+			continue
+		}
+		for _, d := range inv {
+			if d.Address == address && d.Vendor == vendor {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // inventoryGPUVendors counts the GPU vendors a backend could open: a known

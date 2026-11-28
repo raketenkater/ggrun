@@ -1270,6 +1270,9 @@ func draftDeviceForPreflight(backendTag string, gpu int) string {
 	if strings.Contains(strings.ToLower(backendTag), "vulkan") {
 		return fmt.Sprintf("Vulkan%d", gpu)
 	}
+	if strings.EqualFold(strings.TrimSpace(backendTag), "rocm") {
+		return fmt.Sprintf("ROCm%d", gpu)
+	}
 	return fmt.Sprintf("CUDA%d", gpu)
 }
 

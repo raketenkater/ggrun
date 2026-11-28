@@ -792,6 +792,9 @@ type launchRequest struct {
 	// admittedOracleTotals is the oracle's per-device total (MiB) for the argv
 	// the start boundary last started, when the oracle priced exactly it.
 	admittedOracleTotals map[int]int
+	// vendorSelection is a --gpus amd:<n> or pci:<address> selection of AMD
+	// cards (amd_select.go); nil otherwise.
+	vendorSelection *vendorSelection
 	// verifiedScopeKey is this launch's verified-config key, fixed at the
 	// first computation so lookup and save agree.
 	verifiedScopeKey   string
@@ -1522,7 +1525,7 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 			}
 		}
 	}
-	if _, err := parseGPUIndices(req.GPUsFlag); err != nil {
+	if err := gpusFlagSyntaxError(req.GPUsFlag); err != nil {
 		return nil, fmt.Errorf("--gpus: %w", err)
 	}
 	if req.ClaudeProfile != "" && !req.ClaudeCode {
@@ -1928,7 +1931,14 @@ func applyGPUVisibility(req *launchRequest, backendTag string) string {
 		return ""
 	}
 	os.Setenv(key, value)
-	return key + "=" + value
+	shown := key + "=" + value
+	if unset := gpuVisibilityUnset(req, key); len(unset) > 0 {
+		for _, name := range unset {
+			os.Unsetenv(name)
+		}
+		shown += " (unset " + strings.Join(unset, " ") + ")"
+	}
+	return shown
 }
 
 // gpuVisibilityEnv is the variable and value applyGPUVisibility exports, or
@@ -1939,6 +1949,10 @@ func gpuVisibilityEnv(req *launchRequest, backendTag string) (key, value string)
 		// still opens a context on every visible card and may run large-batch
 		// matmuls there, on GPUs another process may be using.
 		return "CUDA_VISIBLE_DEVICES", "-1"
+	}
+	if req != nil && req.vendorSelection != nil && req.vendorSelection.VisKey != "" {
+		// An AMD selection's own variable: raw Vulkan indexes or ROCr ids.
+		return req.vendorSelection.VisKey, req.vendorSelection.VisValue
 	}
 	if req == nil || req.GPUsFlag == "" {
 		return "", ""
@@ -1995,7 +2009,9 @@ func parseGPUIndices(raw string) ([]int, error) {
 // silent narrowing -- reserving a GPU for other work is exactly the case where
 // quietly using it anyway is worst.
 func validateRequestedGPUs(caps *detect.Capabilities, req *launchRequest) error {
-	if req == nil || strings.TrimSpace(req.GPUsFlag) == "" {
+	if req == nil || strings.TrimSpace(req.GPUsFlag) == "" || req.vendorSelection != nil {
+		// An AMD selection was checked against the inventory; the backend
+		// listing checks it again before anything is planned.
 		return nil
 	}
 	requested, err := parseGPUIndices(req.GPUsFlag)
@@ -5644,6 +5660,12 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 			work.record(rec)
 		}
 		if err == nil {
+			// An AMD selection: the backend's own device lines must name the
+			// planned cards before anything is recorded or served.
+			if orderErr := postLoadDeviceCheck(req, p); orderErr != nil {
+				_ = p.Stop()
+				return nil, strategy, serverArgs, orderErr
+			}
 			memoryRecovery.observeProductionLoad(serverArgs, loadElapsed)
 			if req != nil {
 				req.admittedOracleTotals = oracleTotalsByArgv[formatCommand(serverArgs)]
@@ -7066,6 +7088,7 @@ func claudeCompanionLifecycleIdentity(req *launchRequest) string {
 }
 
 func cmdLaunch(args []string) {
+	gpuSelectorsAccepted = true
 	req, err := parseLaunchArgs(args)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -7129,6 +7152,12 @@ func cmdLaunch(args []string) {
 	// a hint. Silently dropping it narrowed the selection (--gpus 0,3 quietly ran
 	// on one card) and dropping all of it fell back to EVERY GPU -- the opposite
 	// of what someone reserving a card for other work asked for.
+	if note, err := resolveGPUSelectors(req, caps, hostPCIDisplays); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	} else if note != "" {
+		fmt.Fprintf(os.Stderr, "[launch] %s\n", note)
+	}
 	if err := validateRequestedGPUs(caps, req); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
@@ -7175,12 +7204,20 @@ func cmdLaunch(args []string) {
 			os.Exit(1)
 		}
 	}
-	if offerAcceleratedMainline(req, model, be, caps, cfg.AssumeYes) {
+	// An AMD selection keeps the backend it named: the offer is a CUDA build.
+	if req.vendorSelection == nil && offerAcceleratedMainline(req, model, be, caps, cfg.AssumeYes) {
 		if next := resolveLaunchBackend(req, model, caps); next != nil {
 			be = next
 		}
 	}
 	applyCachedBackendCapabilities(req, cfg.CacheDir, model, be)
+	if selected, note, err := applyVendorSelection(req, be, caps, launchVendorListers()); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	} else if note != "" {
+		caps = selected
+		fmt.Fprintf(os.Stderr, "[launch] %s\n", note)
+	}
 	if env := applyGPUVisibility(req, backendDialect(be)); env != "" {
 		fmt.Printf("[launch] GPU restriction: %s\n", env)
 	}
@@ -7373,6 +7410,13 @@ func cmdLaunch(args []string) {
 		claudeAuto.stop()
 		if releaseErr := stopFailedLaunchBeforeAdvisor(p, caps, 30*time.Second); releaseErr != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", releaseErr)
+			os.Exit(1)
+		}
+		// The backend loaded on other devices than planned: no launch setting
+		// can help, and the advisor must not retry it.
+		var orderErr *deviceOrderMismatchError
+		if errors.As(err, &orderErr) {
+			fmt.Fprintf(os.Stderr, "Error starting server: %v\n", err)
 			os.Exit(1)
 		}
 		// The backend rejected the model file: no launch setting can help, so
@@ -8439,6 +8483,7 @@ func refuseInventoryOnLaunch(req *launchRequest) {
 }
 
 func cmdDryRun(args []string) {
+	gpuSelectorsAccepted = true
 	req, err := parseLaunchArgs(args)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -8484,6 +8529,7 @@ func cmdDryRun(args []string) {
 			MemoryMaxMB          int                             `json:"memory_max_mb,omitempty"`
 			MemoryHighMB         int                             `json:"memory_high_mb,omitempty"`
 			Environment          map[string]string               `json:"environment"`
+			EnvironmentUnset     []string                        `json:"environment_unset,omitempty"`
 			ServerArgv           []string                        `json:"server_argv"`
 			Residency            placement.ResidencyClass        `json:"residency,omitempty"`
 			Bottleneck           string                          `json:"optimization_bottleneck,omitempty"`
@@ -8500,6 +8546,7 @@ func cmdDryRun(args []string) {
 			MemoryMaxMB:          plan.MemoryMaxMB,
 			MemoryHighMB:         plan.MemoryHighMB,
 			Environment:          plan.Environment,
+			EnvironmentUnset:     plan.EnvUnset,
 			ServerArgv:           serverArgs,
 			Residency:            strategy.Residency,
 			Bottleneck:           strategy.OptimizationBottleneck,
@@ -9760,7 +9807,13 @@ func gateBackendGPU(be *backendInfo, caps *detect.Capabilities) *detect.Capabili
 	if caps == nil || be == nil || len(caps.GPUs) == 0 {
 		return caps
 	}
-	capable, probed := backendGPUCapable(be.Path)
+	var extra []string
+	if strings.EqualFold(be.Dialect, "rocm") {
+		// A HIP build lists ROCm<n> devices; the dialect is set only by an AMD
+		// --gpus selection.
+		extra = append(extra, "rocm")
+	}
+	capable, probed := backendGPUCapable(be.Path, extra...)
 	if !probed || capable {
 		return caps
 	}
@@ -9775,7 +9828,7 @@ func gateBackendGPU(be *backendInfo, caps *detect.Capabilities) *detect.Capabili
 // running `llama-server --list-devices`. Older CLI surfaces can instead list
 // registered buffer types when rejecting an invalid tensor override. Neither
 // probe loads a model. Missing or ambiguous evidence remains unprobed.
-func backendGPUCapable(binPath string) (capable, probed bool) {
+func backendGPUCapable(binPath string, extraPrefixes ...string) (capable, probed bool) {
 	if binPath == "" {
 		return false, false
 	}
@@ -9785,16 +9838,18 @@ func backendGPUCapable(binPath string) (capable, probed bool) {
 	listing := devicelist.Run(devicelist.Probe{Binary: binPath, Timeout: 10 * time.Second, BufferFallback: true})
 	switch {
 	case listing.Grade == devicelist.GradeNames:
-		return backendGPUListing(listing.Output, "available buffer types:")
+		return backendGPUListing(listing.Output, "available buffer types:", extraPrefixes...)
 	case listing.Grade == devicelist.GradeFull && listing.Err == nil:
-		return backendGPUListing(listing.Output, "available devices:")
+		return backendGPUListing(listing.Output, "available devices:", extraPrefixes...)
 	}
 	return false, false
 }
 
 // Read only device/buffer entries, never CUDA/Vulkan examples in later help.
 // CPU-only enumeration is known evidence; unrelated or missing text is not.
-func backendGPUListing(output, header string) (capable, probed bool) {
+// extraPrefixes are device prefixes accepted beside cuda, vulkan and metal
+// (lower case): "rocm" for a HIP build of an AMD selection.
+func backendGPUListing(output, header string, extraPrefixes ...string) (capable, probed bool) {
 	found := false
 	for _, line := range strings.Split(output, "\n") {
 		line = strings.TrimSpace(strings.ToLower(line))
@@ -9813,7 +9868,7 @@ func backendGPUListing(output, header string) (capable, probed bool) {
 		if name == "metal" {
 			return true, true
 		}
-		for _, prefix := range []string{"cuda", "vulkan", "metal"} {
+		for _, prefix := range append([]string{"cuda", "vulkan", "metal"}, extraPrefixes...) {
 			if digits := strings.TrimPrefix(name, prefix); digits != name && digits != "" && strings.IndexFunc(digits, func(r rune) bool { return r < '0' || r > '9' }) < 0 {
 				return true, true
 			}

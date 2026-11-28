@@ -21,6 +21,9 @@ ggrun freetoken Qwen/Qwen3.6-35B-A3B --gpu 0  # experimental separate engine
 
 # Placement and memory
 ggrun model.gguf --gpus 0,1
+# experimental, Linux, a host with GPUs of two vendors: an AMD card by its order
+# or PCI address, on a Vulkan or HIP (ROCm) build of llama-server
+GGRUN_EXPERIMENTAL_AMD=1 ggrun model.gguf --gpus amd:0 --server-bin <llama-server>
 ggrun model.gguf --ram-budget 90G
 ggrun model.gguf --vram-headroom 2G   # leave 2 GB of VRAM free for other apps
 ggrun model.gguf --ram-headroom 8G    # leave 8 GB of system RAM free for other apps

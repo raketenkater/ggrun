@@ -4622,7 +4622,7 @@ func moeLayerRange(model *ModelProfile) (int, int) {
 	return start, count
 }
 
-var otAssignmentPattern = regexp.MustCompile(`blk\\\.\(([^)]*)\).*=(?:CUDA|Vulkan)(\d+)`)
+var otAssignmentPattern = regexp.MustCompile(`blk\\\.\(([^)]*)\).*=(?:CUDA|Vulkan|ROCm)(\d+)`)
 
 func parseOTAssignments(ot string) []GPUAssignment {
 	var out []GPUAssignment
@@ -4892,12 +4892,18 @@ func buildOTStringFromAssignments(assignments []GPUAssignment, gpus []detect.GPU
 
 func otStringUsesDevice(ot string, index int) bool {
 	return strings.Contains(ot, fmt.Sprintf("=CUDA%d", index)) ||
-		strings.Contains(ot, fmt.Sprintf("=Vulkan%d", index))
+		strings.Contains(ot, fmt.Sprintf("=Vulkan%d", index)) ||
+		strings.Contains(ot, fmt.Sprintf("=ROCm%d", index))
 }
 
 func deviceName(backendTag string, index int) string {
 	if strings.EqualFold(backendTag, "vulkan") {
 		return fmt.Sprintf("Vulkan%d", index)
+	}
+	// A HIP build names its devices ROCm<i>; ggrun sets this dialect only for
+	// an AMD --gpus selection.
+	if strings.EqualFold(backendTag, "rocm") {
+		return fmt.Sprintf("ROCm%d", index)
 	}
 	return fmt.Sprintf("CUDA%d", index)
 }
