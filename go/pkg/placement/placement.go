@@ -2044,6 +2044,17 @@ func computeResolvedStrategyCore(caps *detect.Capabilities, model *ModelProfile,
 						restored = nil
 					}
 				}
+				// For MoE, rebuild the -ot from the saved GPU assignment layout
+				// when the exact OTString was not persisted (legacy fallback).
+				if restored != nil && restored.Type == MoEOffload && restored.OTString == "" {
+					ot, ok := rebuildOTStringFromAssignments(vc, caps, model.NumLayers, opts.BackendTag)
+					if !ok {
+						fmt.Fprintln(os.Stderr, "[verified] saved config names no backend dialect and this launch gives none; re-planning")
+						restored = nil
+					} else if ot != "" {
+						restored.OTString = ot
+					}
+				}
 				if restored != nil {
 					restored.CompanionPlacements = append(
 						[]CompanionPlacement(nil), s.CompanionPlacements...,
@@ -2052,13 +2063,6 @@ func computeResolvedStrategyCore(caps *detect.Capabilities, model *ModelProfile,
 					// placement cache uses: the recorded free-VRAM ledger must still
 					// fit, else the config was verified under transiently tighter
 					// VRAM and is not evidence for now.
-					// For MoE, rebuild the -ot from the saved GPU assignment layout
-					// when the exact OTString was not persisted (legacy fallback).
-					if restored.Type == MoEOffload && restored.OTString == "" {
-						if ot := rebuildOTStringFromAssignments(vc, caps, model.NumLayers); ot != "" {
-							restored.OTString = ot
-						}
-					}
 					s = restored
 					NormalizeBatchSizes(s, model, opts.BatchSizeExplicit, opts.UBatchSizeExplicit)
 					s.PlacementCacheHit = true
