@@ -1439,7 +1439,7 @@ func preflightPlacement(req *launchRequest, be *backendInfo, cfg *configForPrefl
 		return inventory
 	})
 	if gated && fitBin == "" {
-		outcome.Err = fmt.Errorf("%s memory cannot be proven: this backend build has no %s that loads this model; build that target from the same source tree", admissionRowPrefix(be), backends.FitParamsTool)
+		outcome.Err = admissionUnknown(fmt.Errorf("%s memory cannot be proven: this backend build has no %s that loads this model; build that target from the same source tree", admissionRowPrefix(be), backends.FitParamsTool))
 		return outcome
 	}
 	allocationProbe := false
@@ -1476,7 +1476,7 @@ func preflightPlacement(req *launchRequest, be *backendInfo, cfg *configForPrefl
 		cfg.Work.record(launchWorkRecord{Kind: "oracle", Model: modelBasename(model), Backend: backendIdentity(be),
 			ArgvHash: argvHash(serverArgs), ElapsedSec: time.Since(oracleStarted).Seconds(), Outcome: oracleOutcome, Reason: oracleReason})
 		if err != nil && gated {
-			outcome.Err = fmt.Errorf("%s memory cannot be proven: the selected backend's memory oracle failed (%v), and the contained allocation probe cannot measure %s devices", admissionRowPrefix(be), err, admissionRowPrefix(be))
+			outcome.Err = admissionUnknown(fmt.Errorf("%s memory cannot be proven: the selected backend's memory oracle failed (%v), and the contained allocation probe cannot measure %s devices; fix the oracle error, or unset GGRUN_EXPERIMENTAL_AMD for the unchecked path", admissionRowPrefix(be), err, admissionRowPrefix(be)))
 			return outcome
 		}
 		if err != nil {
@@ -1554,7 +1554,7 @@ func preflightPlacement(req *launchRequest, be *backendInfo, cfg *configForPrefl
 			rowsErr = rows.checkRows(devs)
 		}
 		if rowsErr != nil {
-			outcome.Err = rowsErr
+			outcome.Err = admissionUnknown(rowsErr)
 			return outcome
 		}
 		fmt.Fprintf(os.Stderr, "[launch] admission rows: %s\n", rows.summary())
@@ -1622,7 +1622,7 @@ func preflightPlacement(req *launchRequest, be *backendInfo, cfg *configForPrefl
 		if cfg.BaselineServing {
 			outcome.ProbeUnavailable = err.Error() + " while the baseline serves; exact admission decides"
 		} else {
-			outcome.Err = err
+			outcome.Err = admissionUnknown(err)
 		}
 		return outcome
 	}

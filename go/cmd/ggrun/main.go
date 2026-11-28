@@ -4809,10 +4809,7 @@ func recordMeasuredLaunchProbes(req *launchRequest, cfg *config.Config, model *p
 	if !model.IsMoE && len(gpus) > 0 && len(oracleTotals) > 0 {
 		placement.RunPostLaunchProbe(cfg.CacheDir, gpus, serverLog, serverPID, nil, oracleTotals, true)
 	}
-	// The system overhead and VRAM-delta probes read nvidia-smi and CUDA log
-	// tags into a cache keyed by hardware only; a gated non-CUDA launch
-	// (admission_rows.go) must not write it.
-	if model.IsMoE && len(gpus) > 0 && !nonCUDAAdmissionApplies(be, caps, hostPCIDisplays) {
+	if model.IsMoE && len(gpus) > 0 && postLaunchSystemProbesApply(be, caps) {
 		// Build the per-GPU companion VRAM map so the system probe can net it
 		// out of the breakdown table's unaccounted column. Without this the
 		// reviewer/worker seated on a card shows up as permanent CUDA overhead
@@ -5124,9 +5121,7 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 		return tunedBatch.retain(next)
 	}
 	runtimeCaps, visibleToPhysical := runtimeGPUCapabilitiesForLaunch(caps, req, strategy)
-	// The staged-prefill microbatch raise prices its rungs with CUDA rows
-	// only, so on the gated non-CUDA path (admission_rows.go) it is not tried.
-	gatedRows := nonCUDAAdmissionApplies(be, runtimeCaps, hostPCIDisplays)
+	raiseApplies := stagedPrefillRaiseApplies(be, runtimeCaps)
 	placementOpts := func() placement.Options {
 		opts := startBoundaryReplanOptions(placementOptionsFromRequest(req, model, be, cfg.CacheDir))
 		tunedBatch.apply(&opts)
@@ -5144,7 +5139,7 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 	// fires when the launch actually failed (the named launchErr is non-nil).
 	reusedFromVerified := strategy != nil && strategy.VerifiedConfigReused
 	defer func() {
-		if reusedFromVerified && launchErr != nil && req != nil && cfg != nil && model != nil && be != nil && caps != nil {
+		if reusedFromVerified && verifiedConfigStaleAfter(launchErr) && req != nil && cfg != nil && model != nil && be != nil && caps != nil {
 			if key := verifiedConfigScopeKey(req, model, be, caps); key != "" {
 				if delErr := placement.DeleteVerifiedConfig(cfg.CacheDir, key); delErr != nil {
 					fmt.Fprintf(os.Stderr, "[launch] warning: could not delete stale verified config: %v\n", delErr)
@@ -5580,7 +5575,7 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 		}
 		// Staged expert prefill: once per launch, try the larger microbatches the
 		// cold estimate never measured, at this exact context and placement.
-		if strategy != nil && model != nil && !exactAdmission && !gatedRows && ubatchRaisedArgs == "" && oracleArgs == formatCommand(serverArgs) {
+		if strategy != nil && model != nil && !exactAdmission && raiseApplies && ubatchRaisedArgs == "" && oracleArgs == formatCommand(serverArgs) {
 			ubatchRaisedArgs = formatCommand(serverArgs) // one attempt, raised or not
 			backendTag := func(s *placement.Strategy) string { return scopedProbeBackendTagForStrategy(req, model, be, s) }
 			plan, ub, ctx := chooseStagedPrefillPlan(findFitParamsBin(be.Path, model.ModelArch), admittedPlans,

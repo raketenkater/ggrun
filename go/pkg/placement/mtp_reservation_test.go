@@ -4,8 +4,7 @@ import "testing"
 
 // mtpYardstick is a synthetic 64 + 1-block delta-net hybrid: 48 recurrent
 // blocks of 817,152 f32 state (149.625 MiB per slot) and a 334.75 MiB NextN
-// block, the shape whose MTP-on buffers were measured (+334.75 model, +299.26
-// recurrent state at n_max 2, 160.02 h_nextn at -b 8192).
+// block.
 func mtpYardstick() (*ModelProfile, *Strategy) {
 	layers := make([]int64, 65)
 	for i := range layers {
@@ -47,12 +46,19 @@ func TestEmbeddedMTPExtraReservationTerms(t *testing.T) {
 	}
 }
 
-func TestEmbeddedMTPExtraReservationArchWithoutRollback(t *testing.T) {
+// Recurrent state is charged whatever the architecture: whether a build
+// rolls it back is not known here, and zero is the unsafe direction. A model
+// without recurrent state gets no snapshot term.
+func TestEmbeddedMTPExtraReservationRecurrentStateWhateverTheArch(t *testing.T) {
 	model, s := mtpYardstick()
-	model.ModelArch = "qwen3next" // recurrent, but llama.cpp clamps n_rs_seq to 0
-	got, err := EmbeddedMTPExtraReservation(model, s)
-	if err != nil || got.RSSnapshotMB != 0 || got.NextNWeightsMB != 335 {
-		t.Fatalf("no-rollback arch: %+v %v", got, err)
+	model.ModelArch = "qwen3next" // a build may clamp n_rs_seq to 0 for it
+	if got, err := EmbeddedMTPExtraReservation(model, s); err != nil || got.RSSnapshotMB != 300 {
+		t.Fatalf("recurrent arch outside a rollback list: %+v %v", got, err)
+	}
+	model, s = mtpYardstick()
+	model.ModelArch, model.HasSSM = "llama", 0
+	if got, err := EmbeddedMTPExtraReservation(model, s); err != nil || got.RSSnapshotMB != 0 || got.NextNWeightsMB != 335 {
+		t.Fatalf("attention-only model: %+v %v", got, err)
 	}
 }
 
@@ -63,7 +69,7 @@ func TestEmbeddedMTPExtraReservationUnknownIsAnError(t *testing.T) {
 		"no per-block bytes":       func(m *ModelProfile, _ *Strategy) { m.NonExpertLayerBytes = m.NonExpertLayerBytes[:10] },
 		"empty NextN block":        func(m *ModelProfile, _ *Strategy) { m.NonExpertLayerBytes[64] = 0 },
 		"MoE without expert bytes": func(m *ModelProfile, _ *Strategy) { m.IsMoE = true },
-		"rollback arch, unsized":   func(m *ModelProfile, _ *Strategy) { m.ModelArch = "nemotron_h" },
+		"recurrent state, unsized": func(m *ModelProfile, _ *Strategy) { m.ModelArch = "nemotron_h" },
 		"no embedding length":      func(m *ModelProfile, _ *Strategy) { m.EmbeddingLength = 0 },
 		"no MTP plan":              func(_ *ModelProfile, s *Strategy) { s.Draft = nil },
 	} {

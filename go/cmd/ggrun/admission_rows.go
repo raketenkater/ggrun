@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -27,9 +28,10 @@ import (
 //
 // The gate (nonCUDAAdmissionApplies) is GGRUN_EXPERIMENTAL_AMD=1 on Linux, a
 // non-CUDA backend dialect, and an OS inventory with GPUs of more than one
-// vendor. Hosts with one GPU vendor, and every host without the opt-in, keep
-// today's path byte for byte: no inventory read beyond the opt-in check, no
-// listing, no reader.
+// vendor. Every host without the opt-in, and every CUDA-family backend, reads
+// nothing new. With the opt-in and a Vulkan backend each gate check reads the
+// sysfs PCI inventory; on a single-vendor host that read is all, and the
+// launch is today's byte for byte (no listing, no reader).
 
 // admissionRowsScopeVersion is the calibration and verified-config scope of
 // a gated launch (placement.CalibrationScopeKey.AdmissionRows).
@@ -90,6 +92,45 @@ func verifiedScopeKeyString(model *placement.ModelProfile, be *backendInfo, caps
 	key := placement.NewCalibrationScopeKey(model, caps, opts, nil)
 	key.AdmissionRows = admissionRowsScope(be, caps)
 	return key.String() + "-plan" + planLogicVersion
+}
+
+// admissionUnknownError is a gated refusal for want of proof (an unverified
+// device order, unknown free memory, a missing or failed oracle, a row set
+// that does not match the map), not a measured deficit. It says nothing
+// about a reused verified config, which therefore is kept.
+type admissionUnknownError struct{ err error }
+
+func (e *admissionUnknownError) Error() string { return e.err.Error() }
+func (e *admissionUnknownError) Unwrap() error { return e.err }
+
+func admissionUnknown(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &admissionUnknownError{err: err}
+}
+
+// verifiedConfigStaleAfter reports whether a launch failure is evidence
+// against the verified config it reused: every failure except a gated
+// refusal for want of proof.
+func verifiedConfigStaleAfter(err error) bool {
+	var unknown *admissionUnknownError
+	return err != nil && !errors.As(err, &unknown)
+}
+
+// postLaunchSystemProbesApply reports whether the MoE post-launch system
+// overhead and VRAM-delta probes may run: they read nvidia-smi and CUDA log
+// tags into a cache keyed by hardware only, which a gated launch must not
+// write.
+func postLaunchSystemProbesApply(be *backendInfo, caps *detect.Capabilities) bool {
+	return !nonCUDAAdmissionApplies(be, caps, hostPCIDisplays)
+}
+
+// stagedPrefillRaiseApplies reports whether the staged-prefill microbatch
+// raise may be tried: it prices its rungs with CUDA rows only, so not on the
+// gated path.
+func stagedPrefillRaiseApplies(be *backendInfo, runtimeCaps *detect.Capabilities) bool {
+	return !nonCUDAAdmissionApplies(be, runtimeCaps, hostPCIDisplays)
 }
 
 // admissionDevice is one device of a gated launch.
@@ -163,11 +204,24 @@ func (r *admissionRows) overheadByGPU(cacheDir string, gpus []detect.GPU) map[in
 	return out
 }
 
-// checkRows refuses an oracle row that names no device of the map, unless it
-// is empty (oracles list idle devices).
+// checkRows requires the oracle's rows to match the map: one row for every
+// mapped device (0/0/0 is fine, absence is not: a missing row would compare
+// nothing and admit, as "fits ()" did), and no nonzero row that names no
+// device of the map (an empty one is an idle device and is ignored).
 func (r *admissionRows) checkRows(devs []preflightDevice) error {
 	if r == nil {
 		return nil
+	}
+	for _, m := range r.devices {
+		n := 0
+		for _, d := range devs {
+			if d.Name == m.Row {
+				n++
+			}
+		}
+		if n != 1 {
+			return fmt.Errorf("the memory oracle printed %d rows for %s (GPU %d), want exactly one (map: %s); refusing", n, m.Row, m.View, r.describe())
+		}
 	}
 	for _, d := range devs {
 		if d.Name == "Host" || d.TotalMB() == 0 {
@@ -234,7 +288,7 @@ var admissionListing = func(path string) (string, error) {
 	if res.TimedOut {
 		return "", fmt.Errorf("%s --list-devices timed out", path)
 	}
-	if res.Output == "" && res.Err != nil {
+	if res.Err != nil {
 		return "", fmt.Errorf("%s --list-devices: %w", path, res.Err)
 	}
 	return res.Output, nil
@@ -269,9 +323,8 @@ func parseListedMemory(prefix, out string) []listedMemory {
 	return listed
 }
 
-// admissionTotalMatches allows the spread APIs report for one card (24,564
-// MiB from NVML, 24,810 MiB from Vulkan on the same card), as
-// matchBackendDevices does.
+// admissionTotalMatches allows the spread APIs report for one card (NVML and
+// Vulkan differ by a few hundred MiB), as matchBackendDevices does.
 func admissionTotalMatches(reported, detected int) bool {
 	diff := reported - detected
 	if diff < 0 {
@@ -281,8 +334,8 @@ func admissionTotalMatches(reported, detected int) bool {
 }
 
 // amdgpuVRAMFree reads whole-card VRAM from amdgpu sysfs: every process's
-// use, floored to MiB free. A runtime-suspended card is not read (the read
-// would wake it).
+// use, floored to MiB free. A card that is runtime-suspended (or changing
+// state) is not read: the read would wake it.
 func amdgpuVRAMFree(pci string) (freeMB, totalMB int, reason string, ok bool) {
 	dir := filepath.Join(amdgpuSysfsRoot, "sys", "bus", "pci", "devices", pci)
 	read := func(name string) (int64, bool) {
@@ -294,7 +347,9 @@ func amdgpuVRAMFree(pci string) (freeMB, totalMB int, reason string, ok bool) {
 		return v, err == nil
 	}
 	if data, err := os.ReadFile(filepath.Join(dir, "power", "runtime_status")); err == nil {
-		if status := strings.TrimSpace(string(data)); status != "" && status != "active" {
+		// "unsupported" means runtime PM is off: the card never suspends.
+		switch status := strings.TrimSpace(string(data)); status {
+		case "suspended", "suspending", "resuming", "error":
 			return 0, 0, "sysfs not read: the card is runtime-" + status, false
 		}
 	}
@@ -326,6 +381,14 @@ func amdgpuVRAMFree(pci string) (freeMB, totalMB int, reason string, ok bool) {
 // holds its memory: the live listing and sysfs figures would count it, so
 // they are not used and a device without another reading is unknown.
 func buildAdmissionRows(be *backendInfo, caps *detect.Capabilities, inventory []detect.PCIDisplay, baselineServing bool) (*admissionRows, error) {
+	rows, err := buildAdmissionRowsChecked(be, caps, inventory, baselineServing)
+	if err != nil {
+		return nil, fmt.Errorf("%v; select the launch's devices with --gpus, or unset GGRUN_EXPERIMENTAL_AMD for the unchecked path", err)
+	}
+	return rows, nil
+}
+
+func buildAdmissionRowsChecked(be *backendInfo, caps *detect.Capabilities, inventory []detect.PCIDisplay, baselineServing bool) (*admissionRows, error) {
 	prefix := admissionRowPrefix(be)
 	gpus := append([]detect.GPU(nil), caps.GPUs...)
 	sort.Slice(gpus, func(i, j int) bool { return gpus[i].Index < gpus[j].Index })
@@ -402,17 +465,16 @@ func buildAdmissionRows(be *backendInfo, caps *detect.Capabilities, inventory []
 }
 
 // chargeIndistinguishable charges each of two or more cards that the listing
-// cannot tell apart (same name, totals within 256 MiB) against the smallest
+// cannot tell apart (same name, totals within the order check's tolerance) against the smallest
 // free figure of the set: which ordinal is which card is not proven before
 // load, so a swap must not admit a plan against the emptier card. One member
 // without an ok reading leaves the whole set unknown.
 func (r *admissionRows) chargeIndistinguishable() {
+	// The same tolerance the order check accepts: two cards it cannot tell
+	// apart there are not told apart here either.
 	alike := func(a, b admissionDevice) bool {
-		diff := a.TotalMB - b.TotalMB
-		if diff < 0 {
-			diff = -diff
-		}
-		return strings.EqualFold(strings.TrimSpace(a.Name), strings.TrimSpace(b.Name)) && diff <= 256
+		return strings.EqualFold(strings.TrimSpace(a.Name), strings.TrimSpace(b.Name)) &&
+			(admissionTotalMatches(a.TotalMB, b.TotalMB) || admissionTotalMatches(b.TotalMB, a.TotalMB))
 	}
 	out := make([]admissionDevice, len(r.devices))
 	copy(out, r.devices)
@@ -451,11 +513,14 @@ func nonCUDAEmbeddedMTPReservation(adm *admissionRows, model *placement.ModelPro
 			continue
 		}
 		computeMB := max(d.ComputeMB, computeFloorMB)
+		// The recurrent snapshots and h_nextn do not scale with context, so
+		// they stay out of ContextMB, which recovery prices per token.
 		rows = append(rows, preflightDevice{
-			Name:      d.Name,
-			ModelMB:   extra.NextNWeightsMB,
-			ContextMB: contextMB + extra.RSSnapshotMB + extra.HNextnMB,
-			ComputeMB: computeMB,
+			Name:          d.Name,
+			ModelMB:       extra.NextNWeightsMB,
+			ContextMB:     contextMB,
+			ComputeMB:     computeMB,
+			UnaccountedMB: extra.RSSnapshotMB + extra.HNextnMB,
 		})
 		terms = append(terms, fmt.Sprintf("%s kv=%d compute=%d nextn=%d rs=%d h_nextn=%d", d.Name, contextMB, computeMB, extra.NextNWeightsMB, extra.RSSnapshotMB, extra.HNextnMB))
 	}
