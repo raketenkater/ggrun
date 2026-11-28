@@ -5789,7 +5789,7 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 			recoveryCandidateArgs = buildLaunchServerArgs(req, cfg, be, caps, model, s)
 		}
 		nextStrategy, nextArgs, method, changed := applyMemoryRecoverySelection(
-			req, strategy, serverArgs, s, model, runtimeCaps,
+			req, strategy, serverArgs, s, model, runtimeCaps, backendDialect(be),
 			preflightOutcome{Device: device, AllocMB: allocMB, AllocMBMeasured: ok && allocMB > 0, DeficitMB: 1, IsComputeBuffer: isComputeBuffer},
 			recoveryCandidateArgs,
 		)
