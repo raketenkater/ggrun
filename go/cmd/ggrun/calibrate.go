@@ -641,7 +641,9 @@ func calibrationScopeKey(req *launchRequest, model *placement.ModelProfile, be *
 
 func calibrationScope(req *launchRequest, model *placement.ModelProfile, be *backendInfo, caps *detect.Capabilities, strategy *placement.Strategy) placement.CalibrationScopeKey {
 	opts := placementOptionsFromRequest(req, model, be, "")
-	return placement.NewCalibrationScopeKey(model, caps, opts, strategy)
+	key := placement.NewCalibrationScopeKey(model, caps, opts, strategy)
+	key.AdmissionRows = admissionRowsScope(be, caps)
+	return key
 }
 
 // scopedCalibrationDecision records the scope components beside the hash.

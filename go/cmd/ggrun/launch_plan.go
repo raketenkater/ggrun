@@ -67,6 +67,15 @@ func planLaunch(req *launchRequest, in planInputs) (*launchPlan, *planError) {
 	// The launch's own check, on the hardware view just taken: a --gpus index
 	// this machine (or inventory) does not have is rejected here, before the
 	// model is read or anything is planned. Shared, not a planPolicy field.
+	// amd:<n> and pci:<address> name this host's cards (amd_select.go).
+	if fromInventory && hasVendorSelector(req.GPUsFlag) {
+		return nil, &planError{Code: 2, Message: "Error: --gpus amd:<n> and pci:<address> select this host's cards and cannot be used with --inventory"}
+	}
+	if selectNote, selErr := resolveGPUSelectors(req, caps, in.HostDisplays); selErr != nil {
+		return nil, &planError{Code: 1, Message: fmt.Sprintf("Error: %v", selErr), Err: selErr}
+	} else if selectNote != "" {
+		note(planNote{Stream: planStderr, Text: "[dry-run] " + selectNote + "\n"})
+	}
 	if gpuErr := requestedGPUsPlanError(caps, req); gpuErr != nil {
 		return nil, gpuErr
 	}
@@ -88,6 +97,15 @@ func planLaunch(req *launchRequest, in planInputs) (*launchPlan, *planError) {
 		return nil, &planError{Code: 1, Message: "Error: " + backendUnavailableMessage(req)}
 	}
 	applyCachedBackendCapabilities(req, cfg.CacheDir, model, be)
+	if req.vendorSelection != nil {
+		listers := vendorListers{ListVulkan: in.ListVulkan, ListVulkanUnder: in.ListVulkanUnder, ListUnderEnv: in.ListUnderEnv, Environ: os.Environ}
+		selected, selectNote, selErr := applyVendorSelection(req, be, caps, listers)
+		if selErr != nil {
+			return nil, &planError{Code: 1, Message: fmt.Sprintf("Error: %v", selErr), Err: selErr}
+		}
+		caps = selected
+		note(planNote{Stream: planStderr, Text: "[dry-run] " + selectNote + "\n"})
+	}
 	// Match cmdLaunch exactly: Claude Auto's helper consumes VRAM before the
 	// main model is packed. Without this reservation a dry-run can claim one
 	// additional expert layer fits and disagree with the real launch.
@@ -142,8 +160,10 @@ func planLaunch(req *launchRequest, in planInputs) (*launchPlan, *planError) {
 	plan.ServerArgv = buildLaunchServerArgs(req, cfg, be, caps, model, strategy)
 	if key, value := gpuVisibilityEnv(req, backendDialect(be)); key != "" {
 		plan.EnvPrefix = key + "=" + value
+		plan.EnvUnset = gpuVisibilityUnset(req, key)
 	}
-	if vulkanDeviceOrderApplies(be, caps) {
+	// An AMD selection's Vulkan order was checked when it was listed.
+	if req.vendorSelection == nil && vulkanDeviceOrderApplies(be, caps) {
 		var listed []listedDevice
 		var vkErr error
 		if fromInventory {
@@ -155,7 +175,18 @@ func planLaunch(req *launchRequest, in planInputs) (*launchPlan, *planError) {
 		}
 		key, value := "", ""
 		if vkErr == nil {
-			key, value, vkErr = vulkanDeviceOrder(req, be, caps, listed)
+			// Never for an inventory plan: it reads nothing from this host.
+			if !fromInventory && in.ListVulkanUnder != nil && vulkanRestrictionApplies(be, caps, in.HostDisplays) {
+				var restrictNote string
+				key, value, restrictNote, vkErr = restrictedVulkanDeviceOrder(req, be, caps, listed, func(visible string) (string, error) {
+					return in.ListVulkanUnder(be.Path, visible)
+				})
+				if restrictNote != "" {
+					note(planNote{Stream: planStderr, Text: "[dry-run] " + restrictNote + "\n"})
+				}
+			} else {
+				key, value, vkErr = vulkanDeviceOrder(req, be, caps, listed)
+			}
 		}
 		if vkErr != nil {
 			note(planNote{Stream: planStderr, Text: fmt.Sprintf("[dry-run] warning: could not align Vulkan device order with detected GPUs: %v\n", vkErr)})
@@ -193,6 +224,7 @@ type launchPlan struct {
 	Refusal      *planError
 	ServerArgv   []string
 	EnvPrefix    string            // the GPU visibility or Vulkan order assignment the summary shows
+	EnvUnset     []string          // variables the launch unsets beside EnvPrefix (an AMD selection on HIP)
 	Environment  map[string]string // planBackendProcess, the plan JSON's "environment"
 	MemoryHighMB int               // planBackendProcess, the plan JSON's "memory_high_mb"
 	MemoryMaxMB  int               // planBackendProcess, the plan JSON's "memory_max_mb"
@@ -313,6 +345,15 @@ type planInputs struct {
 	Model          func(path string) (*placement.ModelProfile, error)
 	ResolveBackend func(req *launchRequest, model *placement.ModelProfile, caps *detect.Capabilities) *backendInfo
 	ListVulkan     func(path string) ([]listedDevice, error)
+	// HostDisplays and ListVulkanUnder serve the Vulkan restriction
+	// (vulkanRestrictionApplies): this host's PCI display inventory and a
+	// listing's output under a given GGML_VK_VISIBLE_DEVICES. Nil leaves
+	// today's order.
+	HostDisplays    func() []detect.PCIDisplay
+	ListVulkanUnder func(path, visible string) (string, error)
+	// ListUnderEnv is a listing under exactly the given environment: the HIP
+	// listing of an AMD selection (applyVendorSelection).
+	ListUnderEnv func(path string, env []string) (string, error)
 	// Note receives each note when it happens, so a sink that prints keeps
 	// today's order against the lines the called functions print directly.
 	Note func(planNote)
@@ -320,13 +361,16 @@ type planInputs struct {
 
 func dryRunPlanInputs(note func(planNote)) planInputs {
 	return planInputs{
-		Policy:         dryRunPlanPolicy,
-		Detect:         detect.Detect,
-		Inventory:      loadInventory,
-		Model:          parseModel,
-		ResolveBackend: resolveLaunchBackend,
-		ListVulkan:     listVulkanDevices,
-		Note:           note,
+		Policy:          dryRunPlanPolicy,
+		Detect:          detect.Detect,
+		Inventory:       loadInventory,
+		Model:           parseModel,
+		ResolveBackend:  resolveLaunchBackend,
+		ListVulkan:      listVulkanDevices,
+		HostDisplays:    detect.HostPCIDisplays,
+		ListVulkanUnder: listVulkanOutputUnder,
+		ListUnderEnv:    listDevicesUnderEnv,
+		Note:            note,
 	}
 }
 

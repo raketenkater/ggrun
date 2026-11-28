@@ -698,7 +698,7 @@ func recoverPreflightOOMOnce(
 		return candidate, candidateArgs, "context-replanned", nil
 	}
 	nextStrategy, nextArgs, method, changed := applyMemoryRecoverySelection(
-		req, strategy, serverArgs, candidate, model, runtimeCaps, outcome, candidateArgs,
+		req, strategy, serverArgs, candidate, model, runtimeCaps, backendDialect(be), outcome, candidateArgs,
 	)
 	// An untyped (oracle total) shortfall goes to the oracle's own complete
 	// re-plan first when one is eligible; the KV-backed context derate answers
@@ -898,6 +898,7 @@ func applyMemoryRecoverySelection(
 	candidate *placement.Strategy,
 	model *placement.ModelProfile,
 	caps *detect.Capabilities,
+	backendTag string,
 	outcome preflightOutcome,
 	completeCandidateArgs ...[]string,
 ) (*placement.Strategy, []string, string, bool) {
@@ -943,7 +944,7 @@ func applyMemoryRecoverySelection(
 		}
 	}
 	nextArgs, entry, method, changed := selectChangedPreflightRecoveryWithArgs(
-		currentArgs, candidate, candidateArgs, model, caps, outcome,
+		currentArgs, candidate, candidateArgs, model, caps, backendTag, outcome,
 	)
 	if !changed {
 		return nil, nil, "", false
@@ -971,13 +972,14 @@ func selectChangedPreflightRecovery(
 	candidate *placement.Strategy,
 	model *placement.ModelProfile,
 	caps *detect.Capabilities,
+	backendTag string,
 	outcome preflightOutcome,
 ) ([]string, *placement.CacheEntry, string, bool) {
 	var candidateArgs []string
 	if candidate != nil {
 		candidateArgs = patchPlacementArgs(currentArgs, candidate)
 	}
-	return selectChangedPreflightRecoveryWithArgs(currentArgs, candidate, candidateArgs, model, caps, outcome)
+	return selectChangedPreflightRecoveryWithArgs(currentArgs, candidate, candidateArgs, model, caps, backendTag, outcome)
 }
 
 func selectChangedPreflightRecoveryWithArgs(
@@ -986,6 +988,7 @@ func selectChangedPreflightRecoveryWithArgs(
 	candidateArgs []string,
 	model *placement.ModelProfile,
 	caps *detect.Capabilities,
+	backendTag string,
 	outcome preflightOutcome,
 ) ([]string, *placement.CacheEntry, string, bool) {
 	currentFingerprint := effectiveMemoryArgsFingerprint(currentArgs)
@@ -1026,7 +1029,7 @@ func selectChangedPreflightRecoveryWithArgs(
 		// classification. Move one routed expert layer off that exact GPU before
 		// reducing global compute throughput via ubatch.
 		nextArgs, entry, ok := placement.DerateCUDAOOMArgsForDeficit(
-			currentArgs, model, caps, outcome.Device,
+			currentArgs, model, caps, backendTag, outcome.Device,
 			maxPreflightInt(outcome.AllocMB, 1), maxPreflightInt(outcome.DeficitMB, 1), false,
 		)
 		if ok && effectiveMemoryArgsFingerprint(nextArgs) != currentFingerprint {
@@ -1037,7 +1040,7 @@ func selectChangedPreflightRecoveryWithArgs(
 		return candidateArgs, nil, "replanned", true
 	}
 	nextArgs, entry, ok := placement.DerateCUDAOOMArgsForDeficit(
-		currentArgs, model, caps, outcome.Device,
+		currentArgs, model, caps, backendTag, outcome.Device,
 		maxPreflightInt(outcome.AllocMB, 1), maxPreflightInt(outcome.DeficitMB, 1), outcome.IsComputeBuffer,
 	)
 	if ok && effectiveMemoryArgsFingerprint(nextArgs) != currentFingerprint {

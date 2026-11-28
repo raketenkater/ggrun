@@ -34,6 +34,7 @@ import (
 	"github.com/raketenkater/ggrun/pkg/controller"
 	"github.com/raketenkater/ggrun/pkg/daemon"
 	"github.com/raketenkater/ggrun/pkg/detect"
+	"github.com/raketenkater/ggrun/pkg/devicelist"
 	"github.com/raketenkater/ggrun/pkg/download"
 	"github.com/raketenkater/ggrun/pkg/gguf"
 	"github.com/raketenkater/ggrun/pkg/libhub"
@@ -660,6 +661,11 @@ func cmdDetect(args []string) {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
+	// GGRUN_EXPERIMENTAL_AMD=1 only: name every GPU the OS lists that ggrun
+	// cannot select for a launch, with the reason. The JSON below is unchanged.
+	for _, note := range detect.UnusableGPUNotes(caps, detect.HostPCIDisplays()) {
+		fmt.Fprintf(os.Stderr, "[detect] %s\n", note)
+	}
 	if *measureBandwidth {
 		fmt.Fprintln(os.Stderr, "[detect] measuring host memcpy and pinned CUDA transfer bandwidth...")
 		profile, path, measureErr := detect.MeasureAndSaveBandwidth(caps)
@@ -786,6 +792,9 @@ type launchRequest struct {
 	// admittedOracleTotals is the oracle's per-device total (MiB) for the argv
 	// the start boundary last started, when the oracle priced exactly it.
 	admittedOracleTotals map[int]int
+	// vendorSelection is a --gpus amd:<n> or pci:<address> selection of AMD
+	// cards (amd_select.go); nil otherwise.
+	vendorSelection *vendorSelection
 	// verifiedScopeKey is this launch's verified-config key, fixed at the
 	// first computation so lookup and save agree.
 	verifiedScopeKey   string
@@ -1516,7 +1525,7 @@ func parseLaunchArgs(args []string) (*launchRequest, error) {
 			}
 		}
 	}
-	if _, err := parseGPUIndices(req.GPUsFlag); err != nil {
+	if err := gpusFlagSyntaxError(req.GPUsFlag); err != nil {
 		return nil, fmt.Errorf("--gpus: %w", err)
 	}
 	if req.ClaudeProfile != "" && !req.ClaudeCode {
@@ -1922,7 +1931,14 @@ func applyGPUVisibility(req *launchRequest, backendTag string) string {
 		return ""
 	}
 	os.Setenv(key, value)
-	return key + "=" + value
+	shown := key + "=" + value
+	if unset := gpuVisibilityUnset(req, key); len(unset) > 0 {
+		for _, name := range unset {
+			os.Unsetenv(name)
+		}
+		shown += " (unset " + strings.Join(unset, " ") + ")"
+	}
+	return shown
 }
 
 // gpuVisibilityEnv is the variable and value applyGPUVisibility exports, or
@@ -1933,6 +1949,10 @@ func gpuVisibilityEnv(req *launchRequest, backendTag string) (key, value string)
 		// still opens a context on every visible card and may run large-batch
 		// matmuls there, on GPUs another process may be using.
 		return "CUDA_VISIBLE_DEVICES", "-1"
+	}
+	if req != nil && req.vendorSelection != nil && req.vendorSelection.VisKey != "" {
+		// An AMD selection's own variable: raw Vulkan indexes or ROCr ids.
+		return req.vendorSelection.VisKey, req.vendorSelection.VisValue
 	}
 	if req == nil || req.GPUsFlag == "" {
 		return "", ""
@@ -1989,7 +2009,9 @@ func parseGPUIndices(raw string) ([]int, error) {
 // silent narrowing -- reserving a GPU for other work is exactly the case where
 // quietly using it anyway is worst.
 func validateRequestedGPUs(caps *detect.Capabilities, req *launchRequest) error {
-	if req == nil || strings.TrimSpace(req.GPUsFlag) == "" {
+	if req == nil || strings.TrimSpace(req.GPUsFlag) == "" || req.vendorSelection != nil {
+		// An AMD selection was checked against the inventory; the backend
+		// listing checks it again before anything is planned.
 		return nil
 	}
 	requested, err := parseGPUIndices(req.GPUsFlag)
@@ -3161,7 +3183,7 @@ func placementOptionsFromRequestCaps(req *launchRequest, model *placement.ModelP
 	if caps != nil && !req.NoCachedConfig {
 		shape := verifiedScopeShape(model, be, caps)
 		if req.verifiedScopeKey == "" || req.verifiedScopeShape != shape {
-			req.verifiedScopeKey = placement.NewCalibrationScopeKey(model, caps, opts, nil).String() + "-plan" + planLogicVersion
+			req.verifiedScopeKey = verifiedScopeKeyString(model, be, caps, opts)
 			req.verifiedScopeShape = shape
 		}
 		opts.VerifiedConfigScopeKey = req.verifiedScopeKey
@@ -4803,7 +4825,7 @@ func recordMeasuredLaunchProbes(req *launchRequest, cfg *config.Config, model *p
 	if !model.IsMoE && len(gpus) > 0 && len(oracleTotals) > 0 {
 		placement.RunPostLaunchProbe(cfg.CacheDir, gpus, serverLog, serverPID, nil, oracleTotals, true)
 	}
-	if model.IsMoE && len(gpus) > 0 {
+	if model.IsMoE && len(gpus) > 0 && postLaunchSystemProbesApply(be, caps) {
 		// Build the per-GPU companion VRAM map so the system probe can net it
 		// out of the breakdown table's unaccounted column. Without this the
 		// reviewer/worker seated on a card shows up as permanent CUDA overhead
@@ -5115,6 +5137,7 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 		return tunedBatch.retain(next)
 	}
 	runtimeCaps, visibleToPhysical := runtimeGPUCapabilitiesForLaunch(caps, req, strategy)
+	raiseApplies := stagedPrefillRaiseApplies(be, runtimeCaps)
 	placementOpts := func() placement.Options {
 		opts := startBoundaryReplanOptions(placementOptionsFromRequest(req, model, be, cfg.CacheDir))
 		tunedBatch.apply(&opts)
@@ -5132,7 +5155,7 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 	// fires when the launch actually failed (the named launchErr is non-nil).
 	reusedFromVerified := strategy != nil && strategy.VerifiedConfigReused
 	defer func() {
-		if reusedFromVerified && launchErr != nil && req != nil && cfg != nil && model != nil && be != nil && caps != nil {
+		if reusedFromVerified && verifiedConfigStaleAfter(launchErr) && req != nil && cfg != nil && model != nil && be != nil && caps != nil {
 			if key := verifiedConfigScopeKey(req, model, be, caps); key != "" {
 				if delErr := placement.DeleteVerifiedConfig(cfg.CacheDir, key); delErr != nil {
 					fmt.Fprintf(os.Stderr, "[launch] warning: could not delete stale verified config: %v\n", delErr)
@@ -5568,7 +5591,7 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 		}
 		// Staged expert prefill: once per launch, try the larger microbatches the
 		// cold estimate never measured, at this exact context and placement.
-		if strategy != nil && model != nil && !exactAdmission && ubatchRaisedArgs == "" && oracleArgs == formatCommand(serverArgs) {
+		if strategy != nil && model != nil && !exactAdmission && raiseApplies && ubatchRaisedArgs == "" && oracleArgs == formatCommand(serverArgs) {
 			ubatchRaisedArgs = formatCommand(serverArgs) // one attempt, raised or not
 			backendTag := func(s *placement.Strategy) string { return scopedProbeBackendTagForStrategy(req, model, be, s) }
 			plan, ub, ctx := chooseStagedPrefillPlan(findFitParamsBin(be.Path, model.ModelArch), admittedPlans,
@@ -5637,6 +5660,12 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 			work.record(rec)
 		}
 		if err == nil {
+			// An AMD selection: the backend's own device lines must name the
+			// planned cards before anything is recorded or served.
+			if orderErr := postLoadDeviceCheck(req, p); orderErr != nil {
+				_ = p.Stop()
+				return nil, strategy, serverArgs, orderErr
+			}
 			memoryRecovery.observeProductionLoad(serverArgs, loadElapsed)
 			if req != nil {
 				req.admittedOracleTotals = oracleTotalsByArgv[formatCommand(serverArgs)]
@@ -5680,6 +5709,13 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 		var measuredComputeByGPU map[int]int
 		if p != nil && p.LogBuf != nil {
 			logData = p.LogBuf.String()
+			// A failed load on devices other than the planned ones (an AMD
+			// selection) is not evidence about the plan: stop before it is
+			// recorded or recovered from.
+			if orderErr := failedLoadDeviceCheck(req, logData); orderErr != nil {
+				_ = p.Stop()
+				return nil, strategy, serverArgs, orderErr
+			}
 			measuredComputeByGPU = recordMeasuredLaunchProbes(req, cfg, model, strategy, be, runtimeCaps, logData, nil, serverProcessPID(p))
 		}
 		// Diagnose before checking the retry budget: a clean, parseable OOM on
@@ -5782,7 +5818,7 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 			recoveryCandidateArgs = buildLaunchServerArgs(req, cfg, be, caps, model, s)
 		}
 		nextStrategy, nextArgs, method, changed := applyMemoryRecoverySelection(
-			req, strategy, serverArgs, s, model, runtimeCaps,
+			req, strategy, serverArgs, s, model, runtimeCaps, backendDialect(be),
 			preflightOutcome{Device: device, AllocMB: allocMB, AllocMBMeasured: ok && allocMB > 0, DeficitMB: 1, IsComputeBuffer: isComputeBuffer},
 			recoveryCandidateArgs,
 		)
@@ -6928,7 +6964,7 @@ func verifiedConfigScopeKey(req *launchRequest, model *placement.ModelProfile, b
 	// it: bumping planLogicVersion retires every stored config exactly once.
 	// Only verified configs carry this; measured calibration data describes the
 	// hardware, not our arithmetic, and stays valid across planner changes.
-	req.verifiedScopeKey = placement.NewCalibrationScopeKey(model, caps, opts, nil).String() + "-plan" + planLogicVersion
+	req.verifiedScopeKey = verifiedScopeKeyString(model, be, caps, opts)
 	req.verifiedScopeShape = shape
 	return req.verifiedScopeKey
 }
@@ -7059,6 +7095,7 @@ func claudeCompanionLifecycleIdentity(req *launchRequest) string {
 }
 
 func cmdLaunch(args []string) {
+	gpuSelectorsAccepted = true
 	req, err := parseLaunchArgs(args)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -7122,6 +7159,12 @@ func cmdLaunch(args []string) {
 	// a hint. Silently dropping it narrowed the selection (--gpus 0,3 quietly ran
 	// on one card) and dropping all of it fell back to EVERY GPU -- the opposite
 	// of what someone reserving a card for other work asked for.
+	if note, err := resolveGPUSelectors(req, caps, hostPCIDisplays); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	} else if note != "" {
+		fmt.Fprintf(os.Stderr, "[launch] %s\n", note)
+	}
 	if err := validateRequestedGPUs(caps, req); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
@@ -7168,12 +7211,20 @@ func cmdLaunch(args []string) {
 			os.Exit(1)
 		}
 	}
-	if offerAcceleratedMainline(req, model, be, caps, cfg.AssumeYes) {
+	// An AMD selection keeps the backend it named: the offer is a CUDA build.
+	if req.vendorSelection == nil && offerAcceleratedMainline(req, model, be, caps, cfg.AssumeYes) {
 		if next := resolveLaunchBackend(req, model, caps); next != nil {
 			be = next
 		}
 	}
 	applyCachedBackendCapabilities(req, cfg.CacheDir, model, be)
+	if selected, note, err := applyVendorSelection(req, be, caps, launchVendorListers()); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	} else if note != "" {
+		caps = selected
+		fmt.Fprintf(os.Stderr, "[launch] %s\n", note)
+	}
 	if env := applyGPUVisibility(req, backendDialect(be)); env != "" {
 		fmt.Printf("[launch] GPU restriction: %s\n", env)
 	}
@@ -7366,6 +7417,13 @@ func cmdLaunch(args []string) {
 		claudeAuto.stop()
 		if releaseErr := stopFailedLaunchBeforeAdvisor(p, caps, 30*time.Second); releaseErr != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", releaseErr)
+			os.Exit(1)
+		}
+		// The backend loaded on other devices than planned: no launch setting
+		// can help, and the advisor must not retry it.
+		var orderErr *deviceOrderMismatchError
+		if errors.As(err, &orderErr) {
+			fmt.Fprintf(os.Stderr, "Error starting server: %v\n", err)
 			os.Exit(1)
 		}
 		// The backend rejected the model file: no launch setting can help, so
@@ -8432,6 +8490,7 @@ func refuseInventoryOnLaunch(req *launchRequest) {
 }
 
 func cmdDryRun(args []string) {
+	gpuSelectorsAccepted = true
 	req, err := parseLaunchArgs(args)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -8477,6 +8536,7 @@ func cmdDryRun(args []string) {
 			MemoryMaxMB          int                             `json:"memory_max_mb,omitempty"`
 			MemoryHighMB         int                             `json:"memory_high_mb,omitempty"`
 			Environment          map[string]string               `json:"environment"`
+			EnvironmentUnset     []string                        `json:"environment_unset,omitempty"`
 			ServerArgv           []string                        `json:"server_argv"`
 			Residency            placement.ResidencyClass        `json:"residency,omitempty"`
 			Bottleneck           string                          `json:"optimization_bottleneck,omitempty"`
@@ -8493,6 +8553,7 @@ func cmdDryRun(args []string) {
 			MemoryMaxMB:          plan.MemoryMaxMB,
 			MemoryHighMB:         plan.MemoryHighMB,
 			Environment:          plan.Environment,
+			EnvironmentUnset:     plan.EnvUnset,
 			ServerArgv:           serverArgs,
 			Residency:            strategy.Residency,
 			Bottleneck:           strategy.OptimizationBottleneck,
@@ -9740,30 +9801,6 @@ func preflightIKOnlyArch(model *placement.ModelProfile, be *backendInfo, caps *d
 	os.Exit(1)
 }
 
-// gateBackendGPU guards against the decoupling of hardware detection and backend
-// capability: ggrun may detect NVIDIA GPUs while the active llama-server is a
-// CPU-only build (e.g. the default Windows bundle), in which case placement
-// would emit -ngl / -ot ...=CUDA0 flags the binary cannot honor — it aborts with
-// "unknown buffer type" and the launcher used to crash-loop on it. When the
-// active backend cannot see any GPU, run CPU-clean and tell the user how to get
-// GPU acceleration. If the backend cannot be probed, caps is left untouched so
-// behavior is unchanged elsewhere (recovery's FailureBackendCapability fast-fail
-// still catches a real mismatch without an infinite restart loop).
-func gateBackendGPU(be *backendInfo, caps *detect.Capabilities) *detect.Capabilities {
-	if caps == nil || be == nil || len(caps.GPUs) == 0 {
-		return caps
-	}
-	capable, probed := backendGPUCapable(be.Path)
-	if !probed || capable {
-		return caps
-	}
-	fmt.Fprintf(os.Stderr, "[launch] notice: %d GPU(s) detected but backend %s is a CPU-only build — running on CPU.\n", len(caps.GPUs), be.Path)
-	fmt.Fprintln(os.Stderr, "[launch] for GPU acceleration reinstall the GPU backend (Windows: install.ps1 -Backend cuda) or set LLAMA_SERVER to a CUDA-capable llama-server.")
-	cpuCaps := *caps
-	cpuCaps.GPUs = nil
-	return &cpuCaps
-}
-
 // backendGPUCapable probes whether the backend binary can see any GPU device by
 // running `llama-server --list-devices`. Older CLI surfaces can instead list
 // registered buffer types when rejecting an invalid tensor override. Neither
@@ -9772,30 +9809,17 @@ func backendGPUCapable(binPath string) (capable, probed bool) {
 	if binPath == "" {
 		return false, false
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	out, err := exec.CommandContext(ctx, binPath, "--list-devices").CombinedOutput()
-	if ctx.Err() != nil {
-		return false, false
+	// The fallback runs only for the known unsupported-option response, not
+	// crashes, driver errors or an unsuccessful device enumeration; one 10 s
+	// bound covers both.
+	listing := devicelist.Run(devicelist.Probe{Binary: binPath, Timeout: 10 * time.Second, BufferFallback: true})
+	switch {
+	case listing.Grade == devicelist.GradeNames:
+		return backendGPUListing(listing.Output, "available buffer types:")
+	case listing.Grade == devicelist.GradeFull && listing.Err == nil:
+		return backendGPUListing(listing.Output, "available devices:")
 	}
-	if err == nil {
-		return backendGPUListing(string(out), "available devices:")
-	}
-	// Fall back only for the known unsupported-option response, not crashes,
-	// driver errors or an unsuccessful device enumeration. The deliberately
-	// invalid buffer makes argument parsing stop before model/server startup.
-	exitErr, exited := err.(*exec.ExitError)
-	if !exited || exitErr.ExitCode() != 1 || !strings.Contains(strings.ToLower(string(out)), "unknown argument: --list-devices") {
-		return false, false
-	}
-	const override = "ggrun_probe=__ggrun_invalid_buffer__"
-	out, err = exec.CommandContext(ctx, binPath, "--override-tensor", override).CombinedOutput()
-	exitErr, exited = err.(*exec.ExitError)
-	if ctx.Err() != nil || !exited || exitErr.ExitCode() != 1 ||
-		!strings.Contains(strings.ToLower(string(out)), "invalid tensor buffer type override: "+override) {
-		return false, false
-	}
-	return backendGPUListing(string(out), "available buffer types:")
+	return false, false
 }
 
 // Read only device/buffer entries, never CUDA/Vulkan examples in later help.

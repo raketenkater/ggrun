@@ -2757,7 +2757,7 @@ func TestCachedHybridPlacementRecomputesRuntimeCheckpointPolicy(t *testing.T) {
 func TestDerateCUDAOOMArgsForDeficitJumpsPastInsufficientRung(t *testing.T) {
 	model := &ModelProfile{NumLayers: 32}
 	args := []string{"llama-server", "-b", "2048", "-ub", "256"}
-	newArgs, entry, ok := DerateCUDAOOMArgsForDeficit(args, model, nil, 0, 17495, 12666, true)
+	newArgs, entry, ok := DerateCUDAOOMArgsForDeficit(args, model, nil, "", 0, 17495, 12666, true)
 	if !ok || entry == nil {
 		t.Fatalf("measured compute deficit did not produce a ubatch recovery: entry=%+v ok=%v", entry, ok)
 	}
@@ -2778,12 +2778,60 @@ func TestUBatchDerateKeepsTheArgvMMapState(t *testing.T) {
 		{[]string{"llama-server", "-b", "2048", "-ub", "512"}, true},
 		{[]string{"llama-server", "-b", "2048", "-ub", "512", "--no-mmap"}, false},
 	} {
-		newArgs, entry, ok := DerateCUDAOOMArgsForDeficit(tc.args, model, nil, 0, 505, 235, true)
+		newArgs, entry, ok := DerateCUDAOOMArgsForDeficit(tc.args, model, nil, "", 0, 505, 235, true)
 		if !ok || entry == nil || entry.UBatchSize >= 512 {
 			t.Fatalf("compute deficit did not derate ubatch: %v %+v", newArgs, entry)
 		}
 		if entry.MMap != tc.mmap || (argIndex(newArgs, "--no-mmap") < 0) != tc.mmap {
 			t.Fatalf("args %v: derate entry MMap=%v, derated argv %v", tc.args, entry.MMap, newArgs)
+		}
+	}
+}
+
+// An expert derate rewrites -ot in the launch's own device dialect. A Vulkan
+// launch must keep naming Vulkan<i> exactly as the primary builder did: the
+// old empty tag wrote CUDA<i> into a Vulkan argv and the backend could not
+// start. CUDA-family tags must keep today's bytes.
+func TestExpertDerateKeepsTheLaunchDeviceDialect(t *testing.T) {
+	model := &ModelProfile{NumLayers: 48, ExpertBytes: int64(52) * 1024 * 1024 * 1024}
+	before := []GPUAssignment{{CUDAIndex: 1, Start: 0, Count: 13}, {CUDAIndex: 0, Start: 13, Count: 6}, {CUDAIndex: 2, Start: 19, Count: 4}}
+	after := []GPUAssignment{{CUDAIndex: 1, Start: 0, Count: 13}, {CUDAIndex: 0, Start: 13, Count: 6}, {CUDAIndex: 2, Start: 19, Count: 3}}
+	derate := func(tag string) (string, *CacheEntry) {
+		t.Helper()
+		args := []string{"llama-server", "-ub", "256", "-ot", buildOTStringFromAssignments(before, nil, model.NumLayers, tag), "--n-cpu-moe", "22"}
+		newArgs, entry, ok := DerateCUDAOOMArgsForDeficit(args, model, nil, tag, 2, 101, 101, false)
+		if !ok || entry == nil {
+			t.Fatalf("tag %q: expert derate did not apply: %v", tag, newArgs)
+		}
+		if got := currentNCPUMoE(newArgs); got != 23 {
+			t.Fatalf("tag %q: n-cpu-moe %d, want 23", tag, got)
+		}
+		ot := newArgs[argIndex(newArgs, "-ot")+1]
+		if entry.OTString != ot {
+			t.Fatalf("tag %q: cache entry -ot %q differs from argv %q", tag, entry.OTString, ot)
+		}
+		return ot, entry
+	}
+
+	vulkan, _ := derate("vulkan")
+	if want := buildOTStringFromAssignments(after, nil, model.NumLayers, "vulkan"); vulkan != want {
+		t.Fatalf("vulkan derate -ot\n%s\nwant the primary builder's\n%s", vulkan, want)
+	}
+	if strings.Contains(vulkan, "CUDA") {
+		t.Fatalf("vulkan derate wrote a CUDA device name: %s", vulkan)
+	}
+	for _, name := range []string{".*=Vulkan1,", ".*=Vulkan0,", `blk\.(19|20|21)\.`} {
+		if !strings.Contains(vulkan, name) {
+			t.Fatalf("vulkan derate -ot lacks %q: %s", name, vulkan)
+		}
+	}
+
+	const cudaWant = `blk\.(0|1|2|3|4|5|6|7|8|9|10|11|12)\.ffn_((gate_up|up_gate|gate|up|down)_(ch|)exps|(gate_inp|gate|up|down)_shexp|gate_inp|gate_tid2eid|exp_probs_b).*=CUDA1,` +
+		`blk\.(13|14|15|16|17|18)\.ffn_((gate_up|up_gate|gate|up|down)_(ch|)exps|(gate_inp|gate|up|down)_shexp|gate_inp|gate_tid2eid|exp_probs_b).*=CUDA0,` +
+		`blk\.(19|20|21)\.ffn_((gate_up|up_gate|gate|up|down)_(ch|)exps|(gate_inp|gate|up|down)_shexp|gate_inp|gate_tid2eid|exp_probs_b).*=CUDA2,exps=CPU`
+	for _, tag := range []string{"", "llama", "ik_llama"} {
+		if got, _ := derate(tag); got != cudaWant {
+			t.Fatalf("tag %q: CUDA derate -ot changed\n%s\nwant\n%s", tag, got, cudaWant)
 		}
 	}
 }

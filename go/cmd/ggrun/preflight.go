@@ -1270,6 +1270,9 @@ func draftDeviceForPreflight(backendTag string, gpu int) string {
 	if strings.Contains(strings.ToLower(backendTag), "vulkan") {
 		return fmt.Sprintf("Vulkan%d", gpu)
 	}
+	if strings.EqualFold(strings.TrimSpace(backendTag), "rocm") {
+		return fmt.Sprintf("ROCm%d", gpu)
+	}
 	return fmt.Sprintf("CUDA%d", gpu)
 }
 
@@ -1314,6 +1317,12 @@ func isEmbeddedMainlineMTP(strategy *placement.Strategy) bool {
 // metadata-derived; charging that full amount plus at least one full target graph
 // reserve to every active CUDA device is intentionally conservative near a limit.
 func embeddedMTPPreflightReservation(model *placement.ModelProfile, strategy *placement.Strategy, target []preflightDevice) ([]preflightDevice, error) {
+	return embeddedMTPPreflightReservationRows(nil, model, strategy, target)
+}
+
+// embeddedMTPPreflightReservationRows is embeddedMTPPreflightReservation for
+// the rows of adm; nil is today's CUDA charge, unchanged.
+func embeddedMTPPreflightReservationRows(adm *admissionRows, model *placement.ModelProfile, strategy *placement.Strategy, target []preflightDevice) ([]preflightDevice, error) {
 	if !isEmbeddedMainlineMTP(strategy) || model == nil {
 		return nil, nil
 	}
@@ -1329,6 +1338,9 @@ func embeddedMTPPreflightReservation(model *placement.ModelProfile, strategy *pl
 		return nil, fmt.Errorf("embedded MTP context cannot be derived from GGUF metadata; rerun with --spec off to skip this check")
 	}
 	const computeFloorMB = 1024
+	if adm != nil {
+		return nonCUDAEmbeddedMTPReservation(adm, model, strategy, target, contextMB, computeFloorMB)
+	}
 	rows := make([]preflightDevice, 0, len(target))
 	for _, d := range target {
 		if _, ok := cudaDeviceIndex(d.Name); !ok {
@@ -1362,10 +1374,16 @@ func cudaDeviceIndex(name string) (int, bool) {
 }
 
 func preflightWorstDeficit(devs []preflightDevice, gpus []detect.GPU, overheadByGPU, runtimeGrowthByGPU map[int]int) (int, int, string) {
+	return preflightWorstDeficitRows(nil, devs, gpus, overheadByGPU, runtimeGrowthByGPU)
+}
+
+// preflightWorstDeficitRows is preflightWorstDeficit with the rows matched
+// and the free memory read through rows; nil is today's CUDA matching.
+func preflightWorstDeficitRows(rows *admissionRows, devs []preflightDevice, gpus []detect.GPU, overheadByGPU, runtimeGrowthByGPU map[int]int) (int, int, string) {
 	worstDev, worstDeficit := -1, 0
 	var summary []string
 	for _, d := range devs {
-		idx, ok := cudaDeviceIndex(d.Name)
+		idx, ok := rows.index(d.Name)
 		if !ok {
 			continue
 		}
@@ -1377,7 +1395,7 @@ func preflightWorstDeficit(devs []preflightDevice, gpus []detect.GPU, overheadBy
 			runtimeMB := runtimeGrowthByGPU[idx]
 			fitMB := d.TotalMB()
 			need := fitMB + overheadMB + runtimeMB
-			free := g.VRAMFreeMB()
+			free := rows.freeMB(g)
 			// Decompose fit into the components the probe already measured. The
 			// success path prints model/context/compute per device; the failure
 			// path printed only the total, so a plan that does NOT fit -- the one
@@ -1414,6 +1432,19 @@ func preflightPlacement(req *launchRequest, be *backendInfo, cfg *configForPrefl
 	}
 	cacheBackendTag := scopedProbeBackendTagForStrategy(req, model, be, strategy)
 	fitBin := findFitParamsBin(be.Path, model.ModelArch)
+	// Gated (admission_rows.go): the backend's non-CUDA rows are mapped and
+	// admitted. The contained allocation probe cannot prove their memory: its
+	// allocator guard and log parsing see CUDA only, and amdgpu spills to
+	// system memory instead of failing, so a load that succeeds proves nothing.
+	var inventory []detect.PCIDisplay
+	gated := nonCUDAAdmissionApplies(be, caps, func() []detect.PCIDisplay {
+		inventory = hostPCIDisplays()
+		return inventory
+	})
+	if gated && fitBin == "" {
+		outcome.Err = admissionUnknown(fmt.Errorf("%s memory cannot be proven: this backend build has no %s that loads this model; build that target from the same source tree", admissionRowPrefix(be), backends.FitParamsTool))
+		return outcome
+	}
 	allocationProbe := false
 	var targetDevs []preflightDevice
 	var fitStderr string
@@ -1447,6 +1478,10 @@ func preflightPlacement(req *launchRequest, be *backendInfo, cfg *configForPrefl
 		}
 		cfg.Work.record(launchWorkRecord{Kind: "oracle", Model: modelBasename(model), Backend: backendIdentity(be),
 			ArgvHash: argvHash(serverArgs), ElapsedSec: time.Since(oracleStarted).Seconds(), Outcome: oracleOutcome, Reason: oracleReason})
+		if err != nil && gated {
+			outcome.Err = admissionUnknown(fmt.Errorf("%s memory cannot be proven: the selected backend's memory oracle failed (%v), and the contained allocation probe cannot measure %s devices; fix the oracle error, or unset GGRUN_EXPERIMENTAL_AMD for the unchecked path", admissionRowPrefix(be), err, admissionRowPrefix(be)))
+			return outcome
+		}
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[launch] selected-backend memory oracle failed; switching to contained allocation probe: %v\n", err)
 			allocationProbe = true
@@ -1514,8 +1549,21 @@ func preflightPlacement(req *launchRequest, be *backendInfo, cfg *configForPrefl
 			}
 		}
 	}
+	var rows *admissionRows
+	if gated {
+		var rowsErr error
+		rows, rowsErr = buildAdmissionRows(be, caps, inventory, cfg.BaselineServing)
+		if rowsErr == nil {
+			rowsErr = rows.checkRows(devs)
+		}
+		if rowsErr != nil {
+			outcome.Err = admissionUnknown(rowsErr)
+			return outcome
+		}
+		fmt.Fprintf(os.Stderr, "[launch] admission rows: %s\n", rows.summary())
+	}
 	if !allocationProbe && isEmbeddedMainlineMTP(strategy) {
-		reservation, reserveErr := embeddedMTPPreflightReservation(model, strategy, targetDevs)
+		reservation, reserveErr := embeddedMTPPreflightReservationRows(rows, model, strategy, targetDevs)
 		if reserveErr != nil {
 			fmt.Fprintf(os.Stderr, "[launch] embedded MTP memory cannot be proven; disabling speculation: %v\n", reserveErr)
 			outcome.CompanionRejected = true
@@ -1537,7 +1585,7 @@ func preflightPlacement(req *launchRequest, be *backendInfo, cfg *configForPrefl
 			UnaccountedByGPU:  map[int]int{},
 		}
 		for _, d := range targetDevs {
-			if idx, ok := cudaDeviceIndex(d.Name); ok {
+			if idx, ok := rows.index(d.Name); ok {
 				computeByGPU[idx] = d.ComputeMB
 				allocation.ContextByGPU[idx] = d.ContextMB
 				allocation.ModelByGPU[idx] = d.ModelMB
@@ -1560,7 +1608,7 @@ func preflightPlacement(req *launchRequest, be *backendInfo, cfg *configForPrefl
 		}
 		_ = placement.RecordMeasuredComputeBuffers(cfg.CacheDir, model, strategy.ContextSize, strategy.UBatchSize, strategy.KVQuality, strategy.KVPlacement, cacheBackendTag, caps.GPUs, strategy.Parallel, computeByGPU)
 	}
-	overheadByGPU := placement.PlanningCUDAOverheadByGPU(cfg.CacheDir, caps.GPUs)
+	overheadByGPU := rows.overheadByGPU(cfg.CacheDir, caps.GPUs)
 	var runtimeGrowthByGPU map[int]int
 	if model != nil && strategy != nil {
 		// Cold-start carry: agree with the fit loop — a device without keyed
@@ -1573,9 +1621,17 @@ func preflightPlacement(req *launchRequest, be *backendInfo, cfg *configForPrefl
 			placement.RelatedModelRuntimeGraphGrowth(cfg.CacheDir, model, caps.GPUs, strategy.Parallel, cacheBackendTag),
 			caps.GPUs, 0)
 	}
-	dev, deficit, summary := preflightWorstDeficit(devs, caps.GPUs, overheadByGPU, runtimeGrowthByGPU)
+	if err := rows.checkMemory(devs); err != nil {
+		if cfg.BaselineServing {
+			outcome.ProbeUnavailable = err.Error() + " while the baseline serves; exact admission decides"
+		} else {
+			outcome.Err = admissionUnknown(err)
+		}
+		return outcome
+	}
+	dev, deficit, summary := preflightWorstDeficitRows(rows, devs, caps.GPUs, overheadByGPU, runtimeGrowthByGPU)
 	if isEmbeddedMainlineMTP(strategy) && deficit > 0 {
-		_, targetDeficit, _ := preflightWorstDeficit(targetDevs, caps.GPUs, overheadByGPU, runtimeGrowthByGPU)
+		_, targetDeficit, _ := preflightWorstDeficitRows(rows, targetDevs, caps.GPUs, overheadByGPU, runtimeGrowthByGPU)
 		if targetDeficit == 0 {
 			fmt.Fprintf(os.Stderr, "[launch] embedded MTP reservation does not fit (%s); disabling speculation and keeping the proven target placement\n", summary)
 			outcome.CompanionRejected = true
@@ -1590,14 +1646,14 @@ func preflightPlacement(req *launchRequest, be *backendInfo, cfg *configForPrefl
 			// that was never measured here falls back to the first-launch
 			// heuristic — the same wrong-by-4x estimate that produced this
 			// deficit in the first place, just at a different ubatch.
-			measureUBatchLadderCandidates(fitBin, serverArgs, cfg, caps, model, strategy, cacheBackendTag)
+			measureUBatchLadderCandidates(fitBin, serverArgs, cfg, caps, model, strategy, cacheBackendTag, rows)
 		}
 		outcome.Device = dev
 		outcome.DeficitMB = deficit
 		outcome.DoesNotFit = true
 		outcome.CompanionRejected = companionRejected
 		for _, d := range devs {
-			if idx, ok := cudaDeviceIndex(d.Name); ok && idx == dev {
+			if idx, ok := rows.index(d.Name); ok && idx == dev {
 				outcome.DeviceComputeMB += d.ComputeMB
 				outcome.DeviceContextMB += d.ContextMB
 			}
@@ -1629,7 +1685,7 @@ func allocationOOMOutcome(outcome preflightOutcome, oom *ikAllocationOOMError) p
 // retry always has measured data to work from rather than the heuristic
 // first-launch estimate. Best-effort: a failed candidate run just means that
 // rung stays on the heuristic, same as before this function existed.
-func measureUBatchLadderCandidates(fitBin string, serverArgs []string, cfg *configForPreflight, caps *detect.Capabilities, model *placement.ModelProfile, strategy *placement.Strategy, backendTag string) {
+func measureUBatchLadderCandidates(fitBin string, serverArgs []string, cfg *configForPreflight, caps *detect.Capabilities, model *placement.ModelProfile, strategy *placement.Strategy, backendTag string, rows *admissionRows) {
 	for _, ub := range placement.UBatchFitLadder {
 		if ub >= strategy.UBatchSize {
 			continue
@@ -1641,7 +1697,7 @@ func measureUBatchLadderCandidates(fitBin string, serverArgs []string, cfg *conf
 		}
 		computeByGPU := map[int]int{}
 		for _, d := range devs {
-			if idx, ok := cudaDeviceIndex(d.Name); ok {
+			if idx, ok := rows.index(d.Name); ok {
 				computeByGPU[idx] = d.ComputeMB
 			}
 		}
@@ -1959,6 +2015,10 @@ type configForPreflight struct {
 	CacheDir string
 	// Work bounds and records the enclosing admission. Nil is unbounded.
 	Work *admissionWork
+	// BaselineServing marks a calibration prescreen while the serving
+	// baseline still holds its memory. Gated rows then cannot use live
+	// readings, and a device left without one makes the outcome inconclusive.
+	BaselineServing bool
 }
 
 // allocationProbeTimeout bounds the contained allocation probe. A --dry-run
