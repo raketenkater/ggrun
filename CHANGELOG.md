@@ -9,6 +9,15 @@
   (TUI: Claude Code → Remote client). The TUI announces it once after upgrade;
   `GGRUN_NO_WHATS_NEW=1` hides such notices.
 
+### Changed
+
+- `ggrun download` always runs the downloader built into the binary, so an
+  older installed copy can no longer reject its flags. `LLM_SCRIPT_DIR`,
+  `LLM_SERVER_HOME` and the app homes no longer select it; set
+  `GGRUN_DOWNLOADER=<file>` to run a specific one.
+- Extracted helper scripts are refused from a cache directory other users can
+  write; without a user cache directory the fallback is per user.
+
 ### Fixed
 
 - The TUI starts much faster with many models: embedded chat templates are

@@ -88,8 +88,13 @@ func TestFindScriptFallsBackOnlyToAnIdenticalInstall(t *testing.T) {
 	stale, same := t.TempDir(), t.TempDir()
 	writeHelper(t, filepath.Join(stale, "download_any_gguf.py"), "# old")
 	t.Setenv("LLM_SCRIPT_DIR", stale)
-	if got := findScript(""); got != "" {
+	got, err := resolveScript("")
+	if got != "" {
 		t.Fatalf("a differing installed copy was selected: %s", got)
+	}
+	runErr := (&Downloader{scriptErr: err}).RunQuant("org/repo", "", nil)
+	if runErr == nil || !strings.Contains(runErr.Error(), blocker) {
+		t.Fatalf("error does not say why the cache failed: %v", runErr)
 	}
 	identical := filepath.Join(same, ".bin", "download_any_gguf.py")
 	writeHelper(t, identical, downloaderSource)

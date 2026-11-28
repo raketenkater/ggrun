@@ -29,15 +29,19 @@ type Downloader struct {
 	CacheDir   string
 	// AssumeYes takes the recommended quant and skips the confirmation.
 	AssumeYes bool
+	// scriptErr is why no downloader was resolved, for the error message.
+	scriptErr error
 }
 
 // New creates a Downloader with auto-discovered script path.
 // appHome is the configured APP_HOME or repo root (may be empty).
 func New(modelDir, cacheDir, appHome string) *Downloader {
+	script, err := resolveScript(appHome)
 	return &Downloader{
-		ScriptPath: findScript(appHome),
+		ScriptPath: script,
 		ModelDir:   modelDir,
 		CacheDir:   cacheDir,
+		scriptErr:  err,
 	}
 }
 
@@ -55,18 +59,25 @@ const downloaderEnv = "GGRUN_DOWNLOADER"
 // hold an older downloader that ignores --repo and waits for input
 // (October 8, `ggrun download` run from AI_Models), or a planted one.
 func findScript(appHome string) string {
+	p, _ := resolveScript(appHome)
+	return p
+}
+
+// resolveScript is findScript with the extraction error when nothing was found.
+func resolveScript(appHome string) (string, error) {
 	if p := os.Getenv(downloaderEnv); p != "" {
-		return p
+		return p, nil
 	}
-	if p, err := embedscript.Extract("download_any_gguf.py", downloaderSource); err == nil {
-		return p
+	p, err := embedscript.Extract("download_any_gguf.py", downloaderSource)
+	if err == nil {
+		return p, nil
 	}
 	for _, c := range installedScriptCandidates(appHome) {
-		if data, err := os.ReadFile(c); err == nil && string(data) == downloaderSource {
-			return c
+		if data, readErr := os.ReadFile(c); readErr == nil && string(data) == downloaderSource {
+			return c, nil
 		}
 	}
-	return ""
+	return "", err
 }
 
 // installedScriptCandidates are the locations the installer, the user's
@@ -117,7 +128,7 @@ func exeScriptCandidates(exeDir string) []string {
 // RunQuant executes the downloader with an optional preselected quant.
 func (d *Downloader) RunQuant(repo string, quant string, caps *detect.Capabilities) error {
 	if d.ScriptPath == "" {
-		return fmt.Errorf("the embedded download_any_gguf.py could not be written to the cache; check that the user cache directory is writable, or set %s to a downloader file", downloaderEnv)
+		return fmt.Errorf("the embedded download_any_gguf.py could not be written to the cache (%v); fix the cache directory, or set %s to a downloader file", d.scriptErr, downloaderEnv)
 	}
 	if _, err := os.Stat(d.ScriptPath); os.IsNotExist(err) {
 		return fmt.Errorf("downloader script not found: %s (check %s)", d.ScriptPath, downloaderEnv)

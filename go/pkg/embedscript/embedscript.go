@@ -41,10 +41,16 @@ func Extract(name, source string) (string, error) {
 	defer mu.Unlock()
 	dir, err := CacheDir()
 	if err != nil {
-		dir = filepath.Join(os.TempDir(), "ggrun-scripts")
+		dir = fallbackDir()
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", fmt.Errorf("create script cache %s: %w", dir, err)
+	}
+	// The extracted file is executed, so the directory must be one no other
+	// user can write: otherwise they could swap the file between this check
+	// and the interpreter opening it.
+	if err := checkPrivateDir(dir); err != nil {
+		return "", err
 	}
 	ext := filepath.Ext(name)
 	stem := strings.TrimSuffix(name, ext)
@@ -72,4 +78,15 @@ func Extract(name, source string) (string, error) {
 		return "", fmt.Errorf("install %s at %s: %w", name, target, err)
 	}
 	return target, nil
+}
+
+// fallbackDir is used when the user cache directory is unknown (HOME and
+// XDG_CACHE_HOME unset). It is per user: a shared name in /tmp could be
+// created first by someone else.
+func fallbackDir() string {
+	name := "ggrun-scripts"
+	if uid := os.Getuid(); uid >= 0 {
+		name = fmt.Sprintf("%s-%d", name, uid)
+	}
+	return filepath.Join(os.TempDir(), name)
 }
