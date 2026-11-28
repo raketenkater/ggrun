@@ -40,6 +40,25 @@ func TestRunCachesACompletedListing(t *testing.T) {
 	}
 }
 
+// NoCache lists again even beside a cached answer and leaves no entry, so a
+// caller reading free memory never gets an old figure.
+func TestRunNoCacheListsEveryTime(t *testing.T) {
+	bin := fakeBackend(t, "echo 'Available devices:'; echo '  Vulkan0: GPU (100 MiB, 50 MiB free)'\n")
+	env := os.Environ()
+	before := StartedListings()
+	Run(Probe{Binary: bin, Env: env, Timeout: 10 * time.Second, NoCache: true})
+	Run(Probe{Binary: bin, Env: env, Timeout: 10 * time.Second, NoCache: true})
+	Run(Probe{Binary: bin, Env: env, Timeout: 10 * time.Second})
+	Run(Probe{Binary: bin, Env: env, Timeout: 10 * time.Second, NoCache: true})
+	if got := StartedListings() - before; got != 4 {
+		t.Fatalf("started %d listings, want 4", got)
+	}
+	Run(Probe{Binary: bin, Env: env, Timeout: 10 * time.Second})
+	if got := StartedListings() - before; got != 4 {
+		t.Fatalf("a cached listing was not reused (%d listings)", got)
+	}
+}
+
 // A different child environment or timeout is a different listing.
 func TestRunKeysOnEnvironmentAndTimeout(t *testing.T) {
 	bin := fakeBackend(t, "echo \"  CUDA0: GPU $CUDA_VISIBLE_DEVICES\"\n")

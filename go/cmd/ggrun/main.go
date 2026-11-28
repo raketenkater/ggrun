@@ -3167,7 +3167,7 @@ func placementOptionsFromRequestCaps(req *launchRequest, model *placement.ModelP
 	if caps != nil && !req.NoCachedConfig {
 		shape := verifiedScopeShape(model, be, caps)
 		if req.verifiedScopeKey == "" || req.verifiedScopeShape != shape {
-			req.verifiedScopeKey = placement.NewCalibrationScopeKey(model, caps, opts, nil).String() + "-plan" + planLogicVersion
+			req.verifiedScopeKey = verifiedScopeKeyString(model, be, caps, opts)
 			req.verifiedScopeShape = shape
 		}
 		opts.VerifiedConfigScopeKey = req.verifiedScopeKey
@@ -4809,7 +4809,10 @@ func recordMeasuredLaunchProbes(req *launchRequest, cfg *config.Config, model *p
 	if !model.IsMoE && len(gpus) > 0 && len(oracleTotals) > 0 {
 		placement.RunPostLaunchProbe(cfg.CacheDir, gpus, serverLog, serverPID, nil, oracleTotals, true)
 	}
-	if model.IsMoE && len(gpus) > 0 {
+	// The system overhead and VRAM-delta probes read nvidia-smi and CUDA log
+	// tags into a cache keyed by hardware only; a gated non-CUDA launch
+	// (admission_rows.go) must not write it.
+	if model.IsMoE && len(gpus) > 0 && !nonCUDAAdmissionApplies(be, caps, hostPCIDisplays) {
 		// Build the per-GPU companion VRAM map so the system probe can net it
 		// out of the breakdown table's unaccounted column. Without this the
 		// reviewer/worker seated on a card shows up as permanent CUDA overhead
@@ -5121,6 +5124,9 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 		return tunedBatch.retain(next)
 	}
 	runtimeCaps, visibleToPhysical := runtimeGPUCapabilitiesForLaunch(caps, req, strategy)
+	// The staged-prefill microbatch raise prices its rungs with CUDA rows
+	// only, so on the gated non-CUDA path (admission_rows.go) it is not tried.
+	gatedRows := nonCUDAAdmissionApplies(be, runtimeCaps, hostPCIDisplays)
 	placementOpts := func() placement.Options {
 		opts := startBoundaryReplanOptions(placementOptionsFromRequest(req, model, be, cfg.CacheDir))
 		tunedBatch.apply(&opts)
@@ -5574,7 +5580,7 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 		}
 		// Staged expert prefill: once per launch, try the larger microbatches the
 		// cold estimate never measured, at this exact context and placement.
-		if strategy != nil && model != nil && !exactAdmission && ubatchRaisedArgs == "" && oracleArgs == formatCommand(serverArgs) {
+		if strategy != nil && model != nil && !exactAdmission && !gatedRows && ubatchRaisedArgs == "" && oracleArgs == formatCommand(serverArgs) {
 			ubatchRaisedArgs = formatCommand(serverArgs) // one attempt, raised or not
 			backendTag := func(s *placement.Strategy) string { return scopedProbeBackendTagForStrategy(req, model, be, s) }
 			plan, ub, ctx := chooseStagedPrefillPlan(findFitParamsBin(be.Path, model.ModelArch), admittedPlans,
@@ -6934,7 +6940,7 @@ func verifiedConfigScopeKey(req *launchRequest, model *placement.ModelProfile, b
 	// it: bumping planLogicVersion retires every stored config exactly once.
 	// Only verified configs carry this; measured calibration data describes the
 	// hardware, not our arithmetic, and stays valid across planner changes.
-	req.verifiedScopeKey = placement.NewCalibrationScopeKey(model, caps, opts, nil).String() + "-plan" + planLogicVersion
+	req.verifiedScopeKey = verifiedScopeKeyString(model, be, caps, opts)
 	req.verifiedScopeShape = shape
 	return req.verifiedScopeKey
 }

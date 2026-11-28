@@ -186,7 +186,7 @@ func prescreenCalibrationCandidate(req *launchRequest, cfg *config.Config, model
 		return false, "", ""
 	}
 	work := newAdmissionWork("prescreen", time.Minute, time.Minute, 0, cfg.CacheDir, nil)
-	outcome := preflightPlacement(req, be, &configForPreflight{CacheDir: cfg.CacheDir, Work: work}, runtimeCaps, model, strategy, args)
+	outcome := preflightPlacement(req, be, &configForPreflight{CacheDir: cfg.CacheDir, Work: work, BaselineServing: true}, runtimeCaps, model, strategy, args)
 	switch {
 	case outcome.Err != nil || outcome.ProbeUnavailable != "":
 		return false, "", ""

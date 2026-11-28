@@ -53,6 +53,9 @@ type Probe struct {
 	// BufferFallback allows the names-grade fallback for a build that
 	// answers "unknown argument: --list-devices".
 	BufferFallback bool
+	// NoCache runs the listing even when an identical one is cached, and
+	// does not cache it: for a caller that reads the "MiB free" figures.
+	NoCache bool
 }
 
 // Grade says how much a listing knows.
@@ -104,6 +107,7 @@ func Run(p Probe) Result {
 		env = os.Environ()
 	}
 	key, keyed := cacheKey(p, env)
+	keyed = keyed && !p.NoCache
 	if keyed {
 		mu.Lock()
 		hit, ok := cache[key]
