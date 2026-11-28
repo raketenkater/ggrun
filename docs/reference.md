@@ -154,6 +154,7 @@ Each sets a config key; the `GGRUN_` spelling wins over the `LLM_` one when both
 - `GGRUN_CLAUDE_REVIEWER_BIN`
 - `GGRUN_CLAUDE_REVIEWER_MODEL`
 - `GGRUN_CTX_SIZE`
+- `GGRUN_DOWNLOADER`
 - `GGRUN_HEALTH_TIMEOUT`
 - `GGRUN_HOST`
 - `GGRUN_INSTALL_CLAUDE`

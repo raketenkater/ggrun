@@ -22,27 +22,79 @@ func clearScriptEnv(t *testing.T) {
 	t.Setenv("LLM_SCRIPT_DIR", "")
 	t.Setenv("LLM_SERVER_HOME", "")
 	t.Setenv("LLM_APP_HOME", "")
+	t.Setenv(downloaderEnv, "")
 }
 
-// A downloader in the working directory (a model directory) or on PATH must
-// not be run (S-10); the installed copy wins.
-func TestFindScriptPrefersTheInstalledCopy(t *testing.T) {
+func writeHelper(t *testing.T, path, body string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Bug #12: a helper left by an older install rejected --non-interactive. A
+// stale copy in LLM_SCRIPT_DIR, LLM_SERVER_HOME or the app home no longer
+// wins over the embedded downloader that matches this binary.
+func TestFindScriptRunsTheEmbeddedCopyOverStaleInstalls(t *testing.T) {
+	cache := redirectScriptCache(t)
+	clearScriptEnv(t)
+	scripts, server, app := t.TempDir(), t.TempDir(), t.TempDir()
+	writeHelper(t, filepath.Join(scripts, "download_any_gguf.py"), "# old helper without --non-interactive")
+	writeHelper(t, filepath.Join(server, "tools", "download", "download_any_gguf.py"), "# old")
+	writeHelper(t, filepath.Join(app, ".bin", "download_any_gguf.py"), "# old")
+	t.Setenv("LLM_SCRIPT_DIR", scripts)
+	t.Setenv("LLM_SERVER_HOME", server)
+	t.Setenv("LLM_APP_HOME", app)
+	got := findScript(app)
+	if filepath.Dir(got) != cache {
+		t.Fatalf("got %s, want the embedded copy under %s", got, cache)
+	}
+	if data, err := os.ReadFile(got); err != nil || string(data) != downloaderSource {
+		t.Fatalf("resolved downloader is not the embedded one (err %v)", err)
+	}
+}
+
+// GGRUN_DOWNLOADER is the explicit choice and is run as given, even when it
+// differs from the embedded copy.
+func TestFindScriptHonoursTheConfiguredDownloader(t *testing.T) {
 	redirectScriptCache(t)
 	clearScriptEnv(t)
-	work, app := t.TempDir(), t.TempDir()
-	if err := os.WriteFile(filepath.Join(work, "download_any_gguf.py"), []byte("# old"), 0o644); err != nil {
-		t.Fatal(err)
+	own := filepath.Join(t.TempDir(), "my_downloader.py")
+	writeHelper(t, own, "# work in progress")
+	t.Setenv("LLM_SCRIPT_DIR", t.TempDir())
+	t.Setenv(downloaderEnv, own)
+	if got := findScript(""); got != own {
+		t.Fatalf("found %s, want the configured %s", got, own)
 	}
-	if err := os.MkdirAll(filepath.Join(app, ".bin"), 0o755); err != nil {
-		t.Fatal(err)
+	d := &Downloader{ScriptPath: own, ModelDir: "/m", CacheDir: "/c"}
+	if args := d.scriptArgs("org/repo", "", nil, true); args[0] != own {
+		t.Fatalf("argv runs %s, want %s", args[0], own)
 	}
-	installed := filepath.Join(app, ".bin", "download_any_gguf.py")
-	if err := os.WriteFile(installed, []byte("# bundled"), 0o644); err != nil {
-		t.Fatal(err)
+}
+
+// When the cache cannot be written, only an installed copy with the embedded
+// bytes is used; a differing one is never a fallback.
+func TestFindScriptFallsBackOnlyToAnIdenticalInstall(t *testing.T) {
+	clearScriptEnv(t)
+	blocker := filepath.Join(t.TempDir(), "file")
+	writeHelper(t, blocker, "not a directory")
+	old := embedscript.CacheDir
+	embedscript.CacheDir = func() (string, error) { return filepath.Join(blocker, "scripts"), nil }
+	t.Cleanup(func() { embedscript.CacheDir = old })
+
+	stale, same := t.TempDir(), t.TempDir()
+	writeHelper(t, filepath.Join(stale, "download_any_gguf.py"), "# old")
+	t.Setenv("LLM_SCRIPT_DIR", stale)
+	if got := findScript(""); got != "" {
+		t.Fatalf("a differing installed copy was selected: %s", got)
 	}
-	t.Chdir(work)
-	if got := findScript(app); got != installed {
-		t.Fatalf("found %s, want the installed %s", got, installed)
+	identical := filepath.Join(same, ".bin", "download_any_gguf.py")
+	writeHelper(t, identical, downloaderSource)
+	if got := findScript(same); got != identical {
+		t.Fatalf("found %q, want the identical install %s", got, identical)
 	}
 }
 
