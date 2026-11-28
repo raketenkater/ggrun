@@ -250,6 +250,16 @@ func VerifiedToStrategy(vc *VerifiedConfig, opts Options, caps *detect.Capabilit
 		d := *vc.Draft
 		s.Draft = &d
 	}
+	// A record saved without a dialect takes the launch's, before any argv
+	// builder reads it: an empty tag names CUDA devices (`--device`,
+	// `--device-draft`) on a Vulkan backend and drops the ik_llama flags. A
+	// recorded tag is kept; the scope key already pins the backend build.
+	if strings.TrimSpace(s.BackendTag) == "" {
+		s.BackendTag = opts.BackendTag
+	}
+	if s.Draft != nil && strings.TrimSpace(s.Draft.BackendTag) == "" {
+		s.Draft.BackendTag = opts.BackendTag
+	}
 	// Request-owned knobs win (placement.go:1026-1034 generalized).
 	if opts.AutoParallel && vc.Parallel > 0 {
 		// opts.Parallel is the automatic ceiling in this mode, not a user-owned
@@ -405,7 +415,7 @@ func VerifiedConfigToRecord(scopeKey, modelBasename string, s *Strategy, backend
 // the record's dialect, or, for a record saved before it carried one, the
 // launch's own dialect (launchTag, the value the primary placement uses). ok is
 // false when neither is known: the names would default to CUDA, which is wrong
-// on a Vulkan or ROCm backend, so the caller re-plans instead.
+// on a Vulkan backend, so the caller re-plans instead.
 func rebuildOTStringFromAssignments(vc *VerifiedConfig, caps *detect.Capabilities, numLayers int, launchTag string) (string, bool) {
 	if vc == nil || len(vc.GPUAssignments) == 0 || numLayers <= 0 {
 		return "", true

@@ -635,3 +635,55 @@ func TestRebuildOTStringFromAssignmentsKeepsARecordedTag(t *testing.T) {
 		t.Fatalf("record without assignments must stay a no-op: ok=%v ot=%q", ok, ot)
 	}
 }
+
+// A replayed record without a dialect takes the launch's before the argv is
+// built: the SingleGPU `--device` and the draft `--device-draft` name Vulkan
+// devices on Vulkan, and a CUDA launch emits exactly what the untagged record
+// emitted before.
+func TestLegacyVerifiedReplayStampsTheLaunchDialect(t *testing.T) {
+	record := func() *VerifiedConfig {
+		return &VerifiedConfig{
+			StrategyType: SingleGPU, MainGPU: 1, ContextSize: 8192, Parallel: 1,
+			Draft: &DraftConfig{Type: DraftModel, Path: "/m/draft.gguf", DraftGPU: 0, DraftMax: 8},
+		}
+	}
+	argAfter := func(args []string, flag string) string {
+		for i := 0; i+1 < len(args); i++ {
+			if args[i] == flag {
+				return args[i+1]
+			}
+		}
+		return ""
+	}
+	vk := VerifiedToStrategy(record(), Options{BackendTag: "vulkan"}, nil)
+	if vk.BackendTag != "vulkan" || vk.Draft == nil || vk.Draft.BackendTag != "vulkan" {
+		t.Fatalf("tags not stamped: strategy %q draft %+v", vk.BackendTag, vk.Draft)
+	}
+	args := vk.Args("/m/x.gguf", 8080)
+	if got := argAfter(args, "--device"); got != "Vulkan1" {
+		t.Fatalf("vulkan --device = %q in %v", got, args)
+	}
+	if got := argAfter(args, "--device-draft"); got != "Vulkan0" {
+		t.Fatalf("vulkan --device-draft = %q in %v", got, args)
+	}
+
+	cuda := VerifiedToStrategy(record(), Options{BackendTag: "llama"}, nil)
+	old := *cuda
+	old.BackendTag = ""
+	oldDraft := *cuda.Draft
+	oldDraft.BackendTag = ""
+	old.Draft = &oldDraft
+	if got, want := strings.Join(cuda.Args("/m/x.gguf", 8080), " "), strings.Join(old.Args("/m/x.gguf", 8080), " "); got != want {
+		t.Fatalf("CUDA argv changed:\n got %s\nwant %s", got, want)
+	}
+	if got := argAfter(cuda.Args("/m/x.gguf", 8080), "--device"); got != "CUDA1" {
+		t.Fatalf("cuda --device = %q", got)
+	}
+
+	tagged := record()
+	tagged.BackendTag = "vulkan"
+	tagged.Draft.BackendTag = "vulkan"
+	if s := VerifiedToStrategy(tagged, Options{BackendTag: "llama"}, nil); s.BackendTag != "vulkan" || s.Draft.BackendTag != "vulkan" {
+		t.Fatalf("recorded tag overwritten: %q / %q", s.BackendTag, s.Draft.BackendTag)
+	}
+}

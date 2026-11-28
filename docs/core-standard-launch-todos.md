@@ -4287,16 +4287,3 @@ miss retaining the raised microbatch without stopping or restarting the server.
 Uncached `scripts/verify-core-engine.sh` passes. Live matched performance and
 clean-relaunch acceptance remain required; no throughput gain is claimed here.
 
-
-# VERIFIED-REPLAY — device names follow the launch backend — 2026-11-28
-
-A MoE verified config saved before records carried a backend tag or an exact
-`-ot` string was replayed from its GPU assignments with that empty tag, so
-`deviceName("")` wrote `=CUDA<i>` into a Vulkan or ROCm command line. The
-legacy rebuild now uses the launch's dialect (`opts.BackendTag`, the value the
-primary placement uses) when the record has none, and refuses the replay
-(re-planning) when neither is known. CUDA output is unchanged. Covered by
-`TestLegacyVerifiedReplayNamesTheLaunchBackendDevices`; unit tests only, no
-live Vulkan run. Not changed: the replayed strategy's own `BackendTag` field
-stays as recorded (draft `--device` in preflight and the mmap compatibility
-check read it).
