@@ -34,6 +34,7 @@ import (
 	"github.com/raketenkater/ggrun/pkg/controller"
 	"github.com/raketenkater/ggrun/pkg/daemon"
 	"github.com/raketenkater/ggrun/pkg/detect"
+	"github.com/raketenkater/ggrun/pkg/devicelist"
 	"github.com/raketenkater/ggrun/pkg/download"
 	"github.com/raketenkater/ggrun/pkg/gguf"
 	"github.com/raketenkater/ggrun/pkg/libhub"
@@ -659,6 +660,11 @@ func cmdDetect(args []string) {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
+	}
+	// GGRUN_EXPERIMENTAL_AMD=1 only: name every GPU the OS lists that ggrun
+	// cannot select for a launch, with the reason. The JSON below is unchanged.
+	for _, note := range detect.UnusableGPUNotes(caps, detect.HostPCIDisplays()) {
+		fmt.Fprintf(os.Stderr, "[detect] %s\n", note)
 	}
 	if *measureBandwidth {
 		fmt.Fprintln(os.Stderr, "[detect] measuring host memcpy and pinned CUDA transfer bandwidth...")
@@ -3161,7 +3167,7 @@ func placementOptionsFromRequestCaps(req *launchRequest, model *placement.ModelP
 	if caps != nil && !req.NoCachedConfig {
 		shape := verifiedScopeShape(model, be, caps)
 		if req.verifiedScopeKey == "" || req.verifiedScopeShape != shape {
-			req.verifiedScopeKey = placement.NewCalibrationScopeKey(model, caps, opts, nil).String() + "-plan" + planLogicVersion
+			req.verifiedScopeKey = verifiedScopeKeyString(model, be, caps, opts)
 			req.verifiedScopeShape = shape
 		}
 		opts.VerifiedConfigScopeKey = req.verifiedScopeKey
@@ -4803,7 +4809,7 @@ func recordMeasuredLaunchProbes(req *launchRequest, cfg *config.Config, model *p
 	if !model.IsMoE && len(gpus) > 0 && len(oracleTotals) > 0 {
 		placement.RunPostLaunchProbe(cfg.CacheDir, gpus, serverLog, serverPID, nil, oracleTotals, true)
 	}
-	if model.IsMoE && len(gpus) > 0 {
+	if model.IsMoE && len(gpus) > 0 && postLaunchSystemProbesApply(be, caps) {
 		// Build the per-GPU companion VRAM map so the system probe can net it
 		// out of the breakdown table's unaccounted column. Without this the
 		// reviewer/worker seated on a card shows up as permanent CUDA overhead
@@ -5115,6 +5121,7 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 		return tunedBatch.retain(next)
 	}
 	runtimeCaps, visibleToPhysical := runtimeGPUCapabilitiesForLaunch(caps, req, strategy)
+	raiseApplies := stagedPrefillRaiseApplies(be, runtimeCaps)
 	placementOpts := func() placement.Options {
 		opts := startBoundaryReplanOptions(placementOptionsFromRequest(req, model, be, cfg.CacheDir))
 		tunedBatch.apply(&opts)
@@ -5132,7 +5139,7 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 	// fires when the launch actually failed (the named launchErr is non-nil).
 	reusedFromVerified := strategy != nil && strategy.VerifiedConfigReused
 	defer func() {
-		if reusedFromVerified && launchErr != nil && req != nil && cfg != nil && model != nil && be != nil && caps != nil {
+		if reusedFromVerified && verifiedConfigStaleAfter(launchErr) && req != nil && cfg != nil && model != nil && be != nil && caps != nil {
 			if key := verifiedConfigScopeKey(req, model, be, caps); key != "" {
 				if delErr := placement.DeleteVerifiedConfig(cfg.CacheDir, key); delErr != nil {
 					fmt.Fprintf(os.Stderr, "[launch] warning: could not delete stale verified config: %v\n", delErr)
@@ -5568,7 +5575,7 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 		}
 		// Staged expert prefill: once per launch, try the larger microbatches the
 		// cold estimate never measured, at this exact context and placement.
-		if strategy != nil && model != nil && !exactAdmission && ubatchRaisedArgs == "" && oracleArgs == formatCommand(serverArgs) {
+		if strategy != nil && model != nil && !exactAdmission && raiseApplies && ubatchRaisedArgs == "" && oracleArgs == formatCommand(serverArgs) {
 			ubatchRaisedArgs = formatCommand(serverArgs) // one attempt, raised or not
 			backendTag := func(s *placement.Strategy) string { return scopedProbeBackendTagForStrategy(req, model, be, s) }
 			plan, ub, ctx := chooseStagedPrefillPlan(findFitParamsBin(be.Path, model.ModelArch), admittedPlans,
@@ -6928,7 +6935,7 @@ func verifiedConfigScopeKey(req *launchRequest, model *placement.ModelProfile, b
 	// it: bumping planLogicVersion retires every stored config exactly once.
 	// Only verified configs carry this; measured calibration data describes the
 	// hardware, not our arithmetic, and stays valid across planner changes.
-	req.verifiedScopeKey = placement.NewCalibrationScopeKey(model, caps, opts, nil).String() + "-plan" + planLogicVersion
+	req.verifiedScopeKey = verifiedScopeKeyString(model, be, caps, opts)
 	req.verifiedScopeShape = shape
 	return req.verifiedScopeKey
 }
@@ -9772,30 +9779,17 @@ func backendGPUCapable(binPath string) (capable, probed bool) {
 	if binPath == "" {
 		return false, false
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	out, err := exec.CommandContext(ctx, binPath, "--list-devices").CombinedOutput()
-	if ctx.Err() != nil {
-		return false, false
+	// The fallback runs only for the known unsupported-option response, not
+	// crashes, driver errors or an unsuccessful device enumeration; one 10 s
+	// bound covers both.
+	listing := devicelist.Run(devicelist.Probe{Binary: binPath, Timeout: 10 * time.Second, BufferFallback: true})
+	switch {
+	case listing.Grade == devicelist.GradeNames:
+		return backendGPUListing(listing.Output, "available buffer types:")
+	case listing.Grade == devicelist.GradeFull && listing.Err == nil:
+		return backendGPUListing(listing.Output, "available devices:")
 	}
-	if err == nil {
-		return backendGPUListing(string(out), "available devices:")
-	}
-	// Fall back only for the known unsupported-option response, not crashes,
-	// driver errors or an unsuccessful device enumeration. The deliberately
-	// invalid buffer makes argument parsing stop before model/server startup.
-	exitErr, exited := err.(*exec.ExitError)
-	if !exited || exitErr.ExitCode() != 1 || !strings.Contains(strings.ToLower(string(out)), "unknown argument: --list-devices") {
-		return false, false
-	}
-	const override = "ggrun_probe=__ggrun_invalid_buffer__"
-	out, err = exec.CommandContext(ctx, binPath, "--override-tensor", override).CombinedOutput()
-	exitErr, exited = err.(*exec.ExitError)
-	if ctx.Err() != nil || !exited || exitErr.ExitCode() != 1 ||
-		!strings.Contains(strings.ToLower(string(out)), "invalid tensor buffer type override: "+override) {
-		return false, false
-	}
-	return backendGPUListing(string(out), "available buffer types:")
+	return false, false
 }
 
 // Read only device/buffer entries, never CUDA/Vulkan examples in later help.

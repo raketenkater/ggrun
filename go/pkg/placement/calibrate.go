@@ -1520,6 +1520,12 @@ type CalibrationScopeKey struct {
 	// decisions are not interchangeable. Empty when automatic or without a
 	// base, which keeps those keys unchanged.
 	KVPlacementRequest string
+	// AdmissionRows names the memory-admission semantics of a launch whose
+	// oracle rows are not CUDA rows and are now admitted (GGRUN_EXPERIMENTAL_AMD
+	// on a multi-vendor host). Records written while those rows were skipped
+	// (no device compared, embedded MTP always refused) are then not found.
+	// The caller sets it; empty keeps every other key unchanged.
+	AdmissionRows string
 }
 
 // NewCalibrationScopeKey builds the key from the same identity sources the
@@ -1668,6 +1674,9 @@ func (k CalibrationScopeKey) String() string {
 	}
 	if k.KVPlacementRequest != "" {
 		parts = append(parts, "kv-request="+k.KVPlacementRequest)
+	}
+	if k.AdmissionRows != "" {
+		parts = append(parts, "admission-rows="+k.AdmissionRows)
 	}
 	return specHash(parts...)
 }

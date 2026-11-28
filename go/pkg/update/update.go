@@ -22,6 +22,7 @@ import (
 
 	"github.com/raketenkater/ggrun/pkg/backends"
 	"github.com/raketenkater/ggrun/pkg/backendverify"
+	"github.com/raketenkater/ggrun/pkg/devicelist"
 
 	"github.com/charmbracelet/x/term"
 )
@@ -1785,23 +1786,20 @@ func smokeBackendConfigured(binary string, cmakeFlags []string) error {
 	if expected == "" {
 		return nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	out, err := exec.CommandContext(ctx, binary, "--list-devices").CombinedOutput()
+	// ik_llama has no --list-devices. Same fallback as backendGPUCapable: an
+	// invalid tensor buffer override stops argument parsing before any model
+	// or server startup, after listing the registered buffer types. One 15 s
+	// bound covers both.
+	listing := devicelist.Run(devicelist.Probe{Binary: binary, Timeout: 15 * time.Second, BufferFallback: true})
+	if listing.Grade == devicelist.GradeNames {
+		if bufferTypesInclude(listing.Output, expected) {
+			return nil
+		}
+		return fmt.Errorf("requested %s build does not report a %s buffer type", expected, expected)
+	}
+	out, err := []byte(listing.Output), listing.Err
 	if exitErr, exited := err.(*exec.ExitError); exited && exitErr.ExitCode() == 1 &&
 		strings.Contains(strings.ToLower(string(out)), "unknown argument: --list-devices") {
-		// ik_llama has no --list-devices. Same fallback as backendGPUCapable: an
-		// invalid tensor buffer override stops argument parsing before any model
-		// or server startup, after listing the registered buffer types.
-		const override = "ggrun_probe=__ggrun_invalid_buffer__"
-		bufOut, bufErr := exec.CommandContext(ctx, binary, "--override-tensor", override).CombinedOutput()
-		if exitErr, exited := bufErr.(*exec.ExitError); ctx.Err() == nil && exited && exitErr.ExitCode() == 1 &&
-			strings.Contains(strings.ToLower(string(bufOut)), "invalid tensor buffer type override: "+override) {
-			if bufferTypesInclude(string(bufOut), expected) {
-				return nil
-			}
-			return fmt.Errorf("requested %s build does not report a %s buffer type", expected, expected)
-		}
 		return fmt.Errorf("%s device probe failed: --list-devices unsupported and buffer probe inconclusive", expected)
 	}
 	if err != nil && len(out) == 0 {
