@@ -29,23 +29,60 @@ type Downloader struct {
 	CacheDir   string
 	// AssumeYes takes the recommended quant and skips the confirmation.
 	AssumeYes bool
+	// scriptErr is why no downloader was resolved, for the error message.
+	scriptErr error
 }
 
 // New creates a Downloader with auto-discovered script path.
 // appHome is the configured APP_HOME or repo root (may be empty).
 func New(modelDir, cacheDir, appHome string) *Downloader {
+	script, err := resolveScript(appHome)
 	return &Downloader{
-		ScriptPath: findScript(appHome),
+		ScriptPath: script,
 		ModelDir:   modelDir,
 		CacheDir:   cacheDir,
+		scriptErr:  err,
 	}
 }
 
+// downloaderEnv names a downloader file to run instead of the embedded one,
+// for working on the helper itself. It is the only way an on-disk copy that
+// differs from the embedded one is run.
+const downloaderEnv = "GGRUN_DOWNLOADER"
+
+// findScript returns the downloader to run: the file named by GGRUN_DOWNLOADER,
+// else the copy compiled into this binary. Installed copies are not preferred:
+// one left by an older install lacks flags this binary passes (a helper from
+// August rejected --non-interactive). An installed copy is used only when the
+// embedded one cannot be written to the cache and its bytes are identical.
+// The working directory and PATH are never searched: a model directory can
+// hold an older downloader that ignores --repo and waits for input
+// (October 8, `ggrun download` run from AI_Models), or a planted one.
 func findScript(appHome string) string {
-	// Only locations the user, the installer or the binary's own install
-	// name are searched. The working directory and PATH are not: a model
-	// directory can hold an older downloader that ignores --repo and waits for
-	// input (October 8, `ggrun download` run from AI_Models), or a planted one.
+	p, _ := resolveScript(appHome)
+	return p
+}
+
+// resolveScript is findScript with the extraction error when nothing was found.
+func resolveScript(appHome string) (string, error) {
+	if p := os.Getenv(downloaderEnv); p != "" {
+		return p, nil
+	}
+	p, err := embedscript.Extract("download_any_gguf.py", downloaderSource)
+	if err == nil {
+		return p, nil
+	}
+	for _, c := range installedScriptCandidates(appHome) {
+		if data, readErr := os.ReadFile(c); readErr == nil && string(data) == downloaderSource {
+			return c, nil
+		}
+	}
+	return "", err
+}
+
+// installedScriptCandidates are the locations the installer, the user's
+// LLM_* homes or the binary's own install may hold a downloader copy.
+func installedScriptCandidates(appHome string) []string {
 	var candidates []string
 	if dir := os.Getenv("LLM_SCRIPT_DIR"); dir != "" {
 		candidates = append(candidates,
@@ -72,16 +109,7 @@ func findScript(appHome string) string {
 	if exe, err := os.Executable(); err == nil {
 		candidates = append(candidates, exeScriptCandidates(filepath.Dir(exe))...)
 	}
-	for _, c := range candidates {
-		if info, err := os.Stat(c); err == nil && !info.IsDir() {
-			return c
-		}
-	}
-	// Nothing on disk: the copy compiled into the binary.
-	if p, err := embedscript.Extract("download_any_gguf.py", downloaderSource); err == nil {
-		return p
-	}
-	return ""
+	return candidates
 }
 
 // exeScriptCandidates are the downloader locations of the binary's own
@@ -100,10 +128,10 @@ func exeScriptCandidates(exeDir string) []string {
 // RunQuant executes the downloader with an optional preselected quant.
 func (d *Downloader) RunQuant(repo string, quant string, caps *detect.Capabilities) error {
 	if d.ScriptPath == "" {
-		return fmt.Errorf("download_any_gguf.py not found; set LLM_SERVER_HOME to the repo root or install the bundled tools")
+		return fmt.Errorf("the embedded download_any_gguf.py could not be written to the cache (%v); fix the cache directory, or set %s to a downloader file", d.scriptErr, downloaderEnv)
 	}
 	if _, err := os.Stat(d.ScriptPath); os.IsNotExist(err) {
-		return fmt.Errorf("downloader script not found: %s", d.ScriptPath)
+		return fmt.Errorf("downloader script not found: %s (check %s)", d.ScriptPath, downloaderEnv)
 	}
 
 	py, ok := python.Command()
