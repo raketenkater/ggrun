@@ -1426,27 +1426,6 @@ func TestBackendGPUCapableLegacyBufferProbe(t *testing.T) {
 	}
 }
 
-func TestGateBackendGPUStripsGPUsForCPUBuild(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("fake-backend probe uses a shell script")
-	}
-	caps := &detect.Capabilities{GPUs: []detect.GPU{{Name: "RTX 4070", VRAMTotalMB: 12288}}}
-
-	cpuBe := &backendInfo{Path: writeFakeBackend(t, "cpu-server", "echo 'Available devices:'\n")}
-	if got := gateBackendGPU(cpuBe, caps); len(got.GPUs) != 0 {
-		t.Fatalf("CPU-only backend: GPUs should be stripped, got %d", len(got.GPUs))
-	}
-	if len(caps.GPUs) != 1 {
-		t.Fatal("gateBackendGPU must not mutate the caller's caps")
-	}
-
-	gpuBe := &backendInfo{Path: writeFakeBackend(t, "gpu-server",
-		"echo 'Available devices:'\necho '  CUDA0: NVIDIA GeForce RTX 4070'\n")}
-	if got := gateBackendGPU(gpuBe, caps); len(got.GPUs) != 1 {
-		t.Fatalf("GPU-capable backend: GPUs must be kept, got %d", len(got.GPUs))
-	}
-}
-
 func isolateConfig(t *testing.T) {
 	t.Helper()
 	t.Setenv("LLM_CONFIG", filepath.Join(t.TempDir(), "missing-config"))

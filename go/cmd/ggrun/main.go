@@ -9801,41 +9801,11 @@ func preflightIKOnlyArch(model *placement.ModelProfile, be *backendInfo, caps *d
 	os.Exit(1)
 }
 
-// gateBackendGPU guards against the decoupling of hardware detection and backend
-// capability: ggrun may detect NVIDIA GPUs while the active llama-server is a
-// CPU-only build (e.g. the default Windows bundle), in which case placement
-// would emit -ngl / -ot ...=CUDA0 flags the binary cannot honor — it aborts with
-// "unknown buffer type" and the launcher used to crash-loop on it. When the
-// active backend cannot see any GPU, run CPU-clean and tell the user how to get
-// GPU acceleration. If the backend cannot be probed, caps is left untouched so
-// behavior is unchanged elsewhere (recovery's FailureBackendCapability fast-fail
-// still catches a real mismatch without an infinite restart loop).
-func gateBackendGPU(be *backendInfo, caps *detect.Capabilities) *detect.Capabilities {
-	if caps == nil || be == nil || len(caps.GPUs) == 0 {
-		return caps
-	}
-	var extra []string
-	if strings.EqualFold(be.Dialect, "rocm") {
-		// A HIP build lists ROCm<n> devices; the dialect is set only by an AMD
-		// --gpus selection.
-		extra = append(extra, "rocm")
-	}
-	capable, probed := backendGPUCapable(be.Path, extra...)
-	if !probed || capable {
-		return caps
-	}
-	fmt.Fprintf(os.Stderr, "[launch] notice: %d GPU(s) detected but backend %s is a CPU-only build — running on CPU.\n", len(caps.GPUs), be.Path)
-	fmt.Fprintln(os.Stderr, "[launch] for GPU acceleration reinstall the GPU backend (Windows: install.ps1 -Backend cuda) or set LLAMA_SERVER to a CUDA-capable llama-server.")
-	cpuCaps := *caps
-	cpuCaps.GPUs = nil
-	return &cpuCaps
-}
-
 // backendGPUCapable probes whether the backend binary can see any GPU device by
 // running `llama-server --list-devices`. Older CLI surfaces can instead list
 // registered buffer types when rejecting an invalid tensor override. Neither
 // probe loads a model. Missing or ambiguous evidence remains unprobed.
-func backendGPUCapable(binPath string, extraPrefixes ...string) (capable, probed bool) {
+func backendGPUCapable(binPath string) (capable, probed bool) {
 	if binPath == "" {
 		return false, false
 	}
@@ -9845,18 +9815,16 @@ func backendGPUCapable(binPath string, extraPrefixes ...string) (capable, probed
 	listing := devicelist.Run(devicelist.Probe{Binary: binPath, Timeout: 10 * time.Second, BufferFallback: true})
 	switch {
 	case listing.Grade == devicelist.GradeNames:
-		return backendGPUListing(listing.Output, "available buffer types:", extraPrefixes...)
+		return backendGPUListing(listing.Output, "available buffer types:")
 	case listing.Grade == devicelist.GradeFull && listing.Err == nil:
-		return backendGPUListing(listing.Output, "available devices:", extraPrefixes...)
+		return backendGPUListing(listing.Output, "available devices:")
 	}
 	return false, false
 }
 
 // Read only device/buffer entries, never CUDA/Vulkan examples in later help.
 // CPU-only enumeration is known evidence; unrelated or missing text is not.
-// extraPrefixes are device prefixes accepted beside cuda, vulkan and metal
-// (lower case): "rocm" for a HIP build of an AMD selection.
-func backendGPUListing(output, header string, extraPrefixes ...string) (capable, probed bool) {
+func backendGPUListing(output, header string) (capable, probed bool) {
 	found := false
 	for _, line := range strings.Split(output, "\n") {
 		line = strings.TrimSpace(strings.ToLower(line))
@@ -9875,7 +9843,7 @@ func backendGPUListing(output, header string, extraPrefixes ...string) (capable,
 		if name == "metal" {
 			return true, true
 		}
-		for _, prefix := range append([]string{"cuda", "vulkan", "metal"}, extraPrefixes...) {
+		for _, prefix := range []string{"cuda", "vulkan", "metal"} {
 			if digits := strings.TrimPrefix(name, prefix); digits != name && digits != "" && strings.IndexFunc(digits, func(r rune) bool { return r < '0' || r > '9' }) < 0 {
 				return true, true
 			}

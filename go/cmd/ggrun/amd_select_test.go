@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -10,7 +11,9 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/raketenkater/ggrun/pkg/config"
 	"github.com/raketenkater/ggrun/pkg/detect"
 	"github.com/raketenkater/ggrun/pkg/devicelist"
 )
@@ -181,6 +184,15 @@ func TestResolveGPUSelectorsAgainstTheInventory(t *testing.T) {
 	vulkaninfo := &detect.Capabilities{GPUs: []detect.GPU{{Index: 0, Name: "AMD Test MI50 (RADV TEST)", VRAMTotalMB: synthAMDT}}}
 	if _, err := resolveGPUSelectors(&launchRequest{GPUsFlag: "amd:0"}, vulkaninfo, displays); err == nil || !strings.Contains(err.Error(), "not an NVIDIA card nvidia-smi reports") {
 		t.Fatalf("vulkaninfo detection: %v", err)
+	}
+
+	// A runtime-suspended card's memory is not read (that would wake it): the
+	// refusal says how to go on.
+	suspended := append(synthInventory(false), detect.PCIDisplay{Address: synthAMD, Vendor: "amd", Driver: "amdgpu", Name: "AMD GPU 0x66a1",
+		MemoryNote: "not read: the card is runtime-suspended", KFDUniqueID: synthKFDID})
+	if _, err := resolveGPUSelectors(&launchRequest{GPUsFlag: "amd:0"}, synthTwoNVIDIA(), func() []detect.PCIDisplay { return suspended }); err == nil ||
+		!strings.Contains(err.Error(), "runtime-suspended); wake it") || !strings.Contains(err.Error(), "/sys/bus/pci/devices/"+synthAMD+"/power/control") {
+		t.Fatalf("suspended card: %v", err)
 	}
 
 	// A single-vendor host and a host without the opt-in refuse.
@@ -469,15 +481,18 @@ func TestPostLoadDeviceCheck(t *testing.T) {
 		{"nested parentheses", vulkan, line("Vulkan0", "AMD Test MI50 (RADV TEST)", "0000:0c:00.0"), ""},
 		{"CUDA-style id", rocm, line("ROCm0", "AMD Instinct Test", "00000000:0C:00.0"), ""},
 		{"other card", rocm, line("ROCm0", "NVIDIA Test GPU 24G", "0000:0a:00.0"), "backend device ROCm0 is 0000:0a:00.0, the plan expected 0000:0c:00.0"},
-		{"no id", rocm, line("ROCm0", "AMD Instinct Test", "unknown id"), "is unknown id"},
-		{"no line", rocm, "llama_model_loader: loaded meta data\n", `no "using device" line (planned: ROCm0)`},
+		{"unknown id", rocm, line("ROCm0", "AMD Instinct Test", "unknown id"), "the backend reports no PCI id for ROCm0"},
+		{"build without an id field", vulkan, "llama_prepare_model_devices: using device Vulkan0 (AMD Test MI50 (RADV TEST)) - 32741 MiB free\n",
+			`"using device" line for Vulkan0 has no PCI id`},
+		{"no line", rocm, "llama_model_loader: loaded meta data\n", `no "using device" line (planned: ROCm0=0000:0c:00.0)`},
 		{"skipping line only", vulkan,
 			"llama_prepare_model_devices: skipping device Vulkan0 (X) with id 0000:0c:00.0 - already using device Vulkan1 (X) with the same id\n",
-			`no "using device" line (planned: Vulkan0)`},
+			`no "using device" line (planned: Vulkan0=0000:0c:00.0)`},
 		{"extra device", rocm, line("ROCm0", "AMD Instinct Test", "0000:0c:00.0") + line("ROCm1", "AMD Instinct Test", "0000:0d:00.0"), "uses ROCm1 (0000:0d:00.0), which the plan does not contain"},
 		{"two selected, the plan uses the second", two, line("ROCm1", "AMD Instinct Test", "0000:0d:00.0"), ""},
 		{"two selected, both used", two, line("ROCm0", "AMD Instinct Test", "0000:0c:00.0") + line("ROCm1", "AMD Instinct Test", "0000:0d:00.0"), ""},
-		{"two selected, swapped", two, line("ROCm1", "AMD Instinct Test", "0000:0c:00.0"), "backend device ROCm1 is 0000:0c:00.0, the plan expected 0000:0d:00.0"},
+		{"two selected, swapped", two, line("ROCm1", "AMD Instinct Test", "0000:0c:00.0"), "backend device ROCm1 is 0000:0c:00.0, the plan expected 0000:0d:00.0 (AMD Instinct Test); planned order ROCm0=0000:0c:00.0, ROCm1=0000:0d:00.0, backend order ROCm1=0000:0c:00.0; " +
+			"the launch is stopped before serving because the backend's devices are not the plan's; select one card with --gpus pci:<address>"},
 	} {
 		err := checkUsingDevices(c.sel, c.log, true)
 		if (c.want == "") != (err == nil) || (err != nil && !strings.Contains(err.Error(), c.want)) {
@@ -546,7 +561,7 @@ func TestAdmissionRowsMapROCmRows(t *testing.T) {
 	}
 }
 
-func TestROCmNamesInPreflightAndGPUCheck(t *testing.T) {
+func TestROCmNamesInPreflight(t *testing.T) {
 	if got := draftDeviceForPreflight("rocm", 1); got != "ROCm1" {
 		t.Fatalf("draft device %q", got)
 	}
@@ -554,13 +569,6 @@ func TestROCmNamesInPreflightAndGPUCheck(t *testing.T) {
 		if got := draftDeviceForPreflight(tag, 1); got != "CUDA1" {
 			t.Fatalf("tag %q: %q", tag, got)
 		}
-	}
-	out := "Available devices:\n  ROCm0: AMD Instinct Test (32768 MiB, 32000 MiB free)\n"
-	if capable, probed := backendGPUListing(out, "available devices:"); capable || !probed {
-		t.Fatalf("today's check: capable %v probed %v", capable, probed)
-	}
-	if capable, probed := backendGPUListing(out, "available devices:", "rocm"); !capable || !probed {
-		t.Fatalf("ROCm dialect: capable %v probed %v", capable, probed)
 	}
 }
 
@@ -670,4 +678,124 @@ func TestPlanLaunchAMDSelection(t *testing.T) {
 			t.Fatalf("--inventory: %+v", o.err)
 		}
 	})
+}
+
+// Two AMD cards on HIP: ROCr surfaces the ROCR_VISIBLE_DEVICES tokens in list
+// order, so the list is written in PCI order and ROCm<k> is the k-th card;
+// the listing must show both with matching totals.
+func TestAMDSelectionOnHIPWithTwoCards(t *testing.T) {
+	selectorsOn(t)
+	card := func(address, id string, totalMB int) detect.PCIDisplay {
+		return detect.PCIDisplay{Address: address, Vendor: "amd", Driver: "amdgpu", Name: "AMD GPU 0x66a1", VRAMTotalMB: totalMB, KFDUniqueID: id}
+	}
+	inv := append(synthInventory(false), card(synthAMD, "1111", synthAMDT), card("0000:0d:00.0", "2222", synthAMDT))
+	listing := func(out string, env *[]string) vendorListers {
+		return vendorListers{
+			ListUnderEnv: func(_ string, e []string) (string, error) { *env = e; return out, nil },
+			Environ:      func() []string { return []string{"PATH=/bin"} },
+		}
+	}
+	both := "Available devices:\n  ROCm0: AMD Instinct Test (32768 MiB, 32000 MiB free)\n  ROCm1: AMD Instinct Test (32768 MiB, 31000 MiB free)\n"
+	req := &launchRequest{GPUsFlag: "amd:1,amd:0"}
+	if _, err := resolveGPUSelectors(req, synthTwoNVIDIA(), func() []detect.PCIDisplay { return inv }); err != nil {
+		t.Fatal(err)
+	}
+	var env []string
+	be := &backendInfo{Path: "/x/hip/bin/llama-server", Tag: "llama", Dialect: "llama"}
+	caps, _, err := applyVendorSelection(req, be, synthTwoNVIDIA(), listing(both, &env))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const value = "GPU-0000000000001111,GPU-0000000000002222"
+	sel := req.vendorSelection
+	if !reflect.DeepEqual(env, []string{"PATH=/bin", "ROCR_VISIBLE_DEVICES=" + value}) || sel.VisValue != value {
+		t.Fatalf("listing env %q value %q", env, sel.VisValue)
+	}
+	if sel.Devices[0].Row != "ROCm0" || sel.Devices[0].Display.Address != synthAMD || sel.Devices[1].Row != "ROCm1" ||
+		sel.Devices[1].Display.Address != "0000:0d:00.0" || req.GPUsFlag != "2,3" || len(caps.GPUs) != 4 || caps.GPUs[3].PCIBusID != "0000:0d:00.0" {
+		t.Fatalf("selection %+v flag %q caps %+v", sel.Devices, req.GPUsFlag, caps.GPUs)
+	}
+	// After load the backend's lines are checked against that order.
+	ok := "x: using device ROCm0 (AMD Instinct Test) (0000:0c:00.0) - 1 MiB free\nx: using device ROCm1 (AMD Instinct Test) (0000:0d:00.0) - 1 MiB free\n"
+	if err := checkUsingDevices(sel, ok, true); err != nil {
+		t.Fatal(err)
+	}
+	swapped := "x: using device ROCm0 (AMD Instinct Test) (0000:0d:00.0) - 1 MiB free\nx: using device ROCm1 (AMD Instinct Test) (0000:0c:00.0) - 1 MiB free\n"
+	if err := checkUsingDevices(sel, swapped, true); err == nil || !strings.Contains(err.Error(), "backend order ROCm0=0000:0d:00.0, ROCm1=0000:0c:00.0") {
+		t.Fatalf("swapped order: %v", err)
+	}
+
+	// A second row of another size is not the second selected card.
+	req = &launchRequest{GPUsFlag: "amd:0,amd:1"}
+	if _, err := resolveGPUSelectors(req, synthTwoNVIDIA(), func() []detect.PCIDisplay { return inv }); err != nil {
+		t.Fatal(err)
+	}
+	other := "Available devices:\n  ROCm0: AMD Instinct Test (32768 MiB, 32000 MiB free)\n  ROCm1: AMD Small Test (8192 MiB, 8000 MiB free)\n"
+	if _, _, err := applyVendorSelection(req, &backendInfo{Path: "/x/hip/bin/llama-server", Dialect: "llama"}, synthTwoNVIDIA(), listing(other, &env)); err == nil ||
+		!strings.Contains(err.Error(), "ROCm1 is AMD Small Test (8192 MiB), the selection expects AMD GPU 0x66a1 at 0000:0d:00.0") {
+		t.Fatalf("wrong second card: %v", err)
+	}
+}
+
+// The launch loop's wiring: a successful start on the planned card serves; a
+// start, or a failed start, whose device line names another card is stopped
+// at once, loaded once, with the verified config kept and no recovery retry.
+func TestLaunchLoopStopsOnTheBackendsDeviceLines(t *testing.T) {
+	for _, c := range []struct {
+		name, port, printed, failUB string
+		stop                        bool
+	}{
+		{"the planned card", "59986", synthNV0, "", false},
+		{"another card", "59987", synthNV1, "", true},
+		{"another card, failed start", "59988", synthNV1, "*", true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			req, model, strategy, be, caps, args, loads := warmupFixture(t, c.port, c.failUB)
+			script, err := os.ReadFile(be.Path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			const anchor = `echo "sched_reserve:`
+			line := `echo "llama_prepare_model_devices: using device CUDA0 (NVIDIA Test GPU) (` + c.printed + `) - 12000 MiB free" >&2` + "\n"
+			if !strings.Contains(string(script), anchor) {
+				t.Fatal("fixture script changed")
+			}
+			if err := os.WriteFile(be.Path, []byte(strings.Replace(string(script), anchor, line+anchor, 1)), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			req.UBatchSize, req.UBatchSizeSet = 64, true // no raise: one argv
+			req.vendorSelection = &vendorSelection{Devices: []vendorDevice{{Row: "CUDA0", Name: "NVIDIA Test GPU", Display: detect.PCIDisplay{Address: synthNV0}}}}
+			recovery := newLaunchMemoryRecovery()
+			recovery.plannerDisproved = true
+			p, _, _, err := startLaunchWithCUDAOOMRecoveryState(req, &config.Config{CacheDir: t.TempDir()}, model, strategy, be, caps, args, 30*time.Second, recovery)
+			if p != nil {
+				defer p.Stop()
+			}
+			var mismatch *deviceOrderMismatchError
+			if !c.stop {
+				if err != nil || p == nil {
+					t.Fatalf("planned card refused: %v", err)
+				}
+			} else if err == nil || !errors.As(err, &mismatch) || verifiedConfigStaleAfter(err) || p != nil {
+				t.Fatalf("another card: err %v process %v", err, p != nil)
+			}
+			if got := loadedArgvs(t, loads); len(got) != 1 {
+				t.Fatalf("%d loads, want 1: %q", len(got), got)
+			}
+			if c.stop {
+				free := false
+				for i := 0; i < 50 && !free; i++ {
+					if l, err := net.Listen("tcp", "127.0.0.1:"+c.port); err == nil {
+						l.Close()
+						free = true
+					} else {
+						time.Sleep(100 * time.Millisecond)
+					}
+				}
+				if !free {
+					t.Fatal("the stopped backend still holds its port")
+				}
+			}
+		})
+	}
 }

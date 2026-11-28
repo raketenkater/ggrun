@@ -387,6 +387,10 @@ func UnusableGPUNotes(caps *Capabilities, inv []PCIDisplay) []string {
 			reason = "it is bound to vfio-pci (reserved for a virtual machine)"
 		case d.Vendor == "nvidia":
 			reason = "nvidia-smi does not report it (driver " + d.Driver + ")"
+		case fromNVIDIA && d.Vendor == "amd" && d.Driver == "amdgpu":
+			// The notes are printed only with GGRUN_EXPERIMENTAL_AMD=1, where a
+			// launch can select this card.
+			reason = "launches use the NVIDIA GPUs that nvidia-smi reports unless --gpus selects this AMD GPU: --gpus pci:" + d.Address + " with a Vulkan or HIP (ROCm) build of llama-server (--server-bin)"
 		case fromNVIDIA:
 			reason = "ggrun launches only on the NVIDIA GPUs that nvidia-smi reports; this " + vendorTitle(d.Vendor) + " GPU cannot be selected beside them yet"
 		default:

@@ -231,8 +231,14 @@ func TestUnusableGPUNotes(t *testing.T) {
 		t.Fatal(err)
 	}
 	notes := UnusableGPUNotes(nvidiaFixtureCaps(), inv)
-	want := []string{"AMD Radeon Pro VII / Radeon Instinct MI50 (Vega 20) at 0000:19:00.0 (driver amdgpu, 32752 MiB, PCIe Gen3 x16) is not used by ggrun: " +
-		"ggrun launches only on the NVIDIA GPUs that nvidia-smi reports; this AMD GPU cannot be selected beside them yet"}
+	amd := ""
+	for _, d := range inv {
+		if d.Vendor == "amd" {
+			amd = d.Address
+		}
+	}
+	want := []string{"AMD Radeon Pro VII / Radeon Instinct MI50 (Vega 20) at " + amd + " (driver amdgpu, 32752 MiB, PCIe Gen3 x16) is not used by ggrun: " +
+		"launches use the NVIDIA GPUs that nvidia-smi reports unless --gpus selects this AMD GPU: --gpus pci:" + amd + " with a Vulkan or HIP (ROCm) build of llama-server (--server-bin)"}
 	if !reflect.DeepEqual(notes, want) {
 		t.Fatalf("notes:\n got %q\nwant %q", notes, want)
 	}

@@ -25,10 +25,15 @@ import (
 //   - Vulkan: no listing prints a PCI address, so the card is found in the
 //     backend's default listing by its total memory, leaving out every device
 //     named like a detected GPU or another vendor; more than one candidate is
-//     refused. The export is the raw index of PR #241's restriction, and the
-//     listing under it must show exactly the selected cards;
+//     refused. The export is the card's raw Vulkan index (vulkanRawIndices),
+//     and the listing under it must show exactly the selected cards;
 //   - HIP (ROCm): ROCR_VISIBLE_DEVICES names each card by its KFD unique id,
 //     so the listing under it shows only those; count and totals must match.
+//     ROCr surfaces the listed GPUs in the order of the list's tokens (its
+//     device filter ranks each token by position; ROCm 6.3 amd_topology.cpp
+//     and amd_filter_device.cpp), and HIP numbers them in that order, so
+//     ROCm<k> is the k-th card of the list, which is written in PCI address
+//     order. The post-load check verifies it.
 //
 // The cards are appended after the detected GPUs and --gpus is rewritten to
 // their indexes, so every reader of --gpus sees the shape it already handles
@@ -306,7 +311,14 @@ func resolveGPUSelectors(req *launchRequest, caps *detect.Capabilities, displays
 			if why == "" {
 				why = "amdgpu reports no VRAM total"
 			}
-			return "", fmt.Errorf("--gpus %s: the memory of %s at %s is unknown (%s)", flag, d.Name, d.Address, why)
+			next := "check /sys/bus/pci/devices/" + d.Address + "/mem_info_vram_total"
+			if strings.Contains(why, "runtime-") {
+				// Reading the memory files would wake the card, so the inventory
+				// does not; the user decides to wake it.
+				next = "wake it (run any GPU job on it, or as root write \"on\" to /sys/bus/pci/devices/" + d.Address +
+					"/power/control) and check /sys/bus/pci/devices/" + d.Address + "/power/runtime_status reads \"active\""
+			}
+			return "", fmt.Errorf("--gpus %s: the memory of %s at %s is unknown (%s); %s, then retry", flag, d.Name, d.Address, why, next)
 		}
 		sel.Devices = append(sel.Devices, vendorDevice{Display: d, Token: p.token})
 	}
@@ -613,9 +625,13 @@ func gpuVisibilityUnset(req *launchRequest, key string) []string {
 // usingDevicePattern is llama.cpp's line for each device a model loads on,
 // printed before any tensor is loaded: "<func>: using device ROCm0 (<desc>)
 // (<id>) - <n> MiB free". The description may hold parentheses; the id is
-// the last group. The "skipping device ... already using device" line does
-// not match.
+// the last group, "unknown id" when the backend reports none. The "skipping
+// device ... already using device" line does not match.
 var usingDevicePattern = regexp.MustCompile(`(?:^|\s)\w+: using device (\S+) \((.*)\) \(([^()]*)\) - \d+ MiB free`)
+
+// usingDeviceNoIDPattern is the same line from a build that prints no id
+// field at all: "<func>: using device Vulkan0 (<desc>) - <n> MiB free".
+var usingDeviceNoIDPattern = regexp.MustCompile(`(?:^|\s)\w+: using device (\S+) \(.*\) - \d+ MiB free`)
 
 // deviceOrderMismatchError stops a launch whose backend loaded on devices
 // other than the plan's.
@@ -633,10 +649,13 @@ func checkUsingDevices(sel *vendorSelection, log string, requireLine bool) error
 		return nil
 	}
 	ids := map[string]string{}
-	var order []string
+	var order, noID []string
 	for _, line := range strings.Split(log, "\n") {
 		m := usingDevicePattern.FindStringSubmatch(line)
 		if m == nil {
+			if n := usingDeviceNoIDPattern.FindStringSubmatch(line); n != nil && !slices.Contains(noID, n[1]) {
+				noID = append(noID, n[1])
+			}
 			continue
 		}
 		if _, seen := ids[m[1]]; !seen {
@@ -644,28 +663,50 @@ func checkUsingDevices(sel *vendorSelection, log string, requireLine bool) error
 		}
 		ids[m[1]] = strings.TrimSpace(m[3])
 	}
-	fail := func(format string, args ...any) error {
-		return &deviceOrderMismatchError{msg: fmt.Sprintf(format, args...) +
-			"; the launch is stopped before serving because the backend's devices are not the plan's"}
-	}
-	if requireLine && len(order) == 0 {
-		rows := make([]string, 0, len(sel.Devices))
-		for _, d := range sel.Devices {
-			rows = append(rows, d.Row)
-		}
-		return fail("the backend printed no \"using device\" line (planned: %s)", strings.Join(rows, ", "))
-	}
 	planned := map[string]vendorDevice{}
+	plannedOrder := make([]string, 0, len(sel.Devices))
 	for _, d := range sel.Devices {
 		planned[d.Row] = d
+		plannedOrder = append(plannedOrder, d.Row+"="+d.Display.Address)
+	}
+	backendOrder := make([]string, 0, len(order))
+	for _, row := range order {
+		backendOrder = append(backendOrder, row+"="+ids[row])
+	}
+	const stopped = "; the launch is stopped before serving because the backend's devices are not the plan's"
+	fail := func(next, format string, args ...any) error {
+		return &deviceOrderMismatchError{msg: fmt.Sprintf(format, args...) + stopped + "; " + next}
+	}
+	next := "please report the backend's log"
+	if len(sel.Devices) > 1 {
+		next = "select one card with --gpus pci:<address>, which needs no order, and please report both orders"
+	}
+	const noIDNext = "use a llama.cpp build that reports each device's PCI id"
+	if len(order) == 0 {
+		// A failed start without a device proof goes to today's handling.
+		if !requireLine {
+			return nil
+		}
+		if len(noID) > 0 {
+			return fail(noIDNext, "the backend's \"using device\" line for %s has no PCI id, so the device order cannot be checked", strings.Join(noID, ", "))
+		}
+		return fail("check the backend's log for its device lines", "the backend printed no \"using device\" line (planned: %s)", strings.Join(plannedOrder, ", "))
 	}
 	for _, row := range order {
 		d, ok := planned[row]
 		if !ok {
-			return fail("the backend uses %s (%s), which the plan does not contain", row, ids[row])
+			return fail(next, "the backend uses %s (%s), which the plan does not contain (planned: %s)", row, ids[row], strings.Join(plannedOrder, ", "))
+		}
+		if strings.EqualFold(ids[row], "unknown id") {
+			if !requireLine {
+				continue
+			}
+			return fail(noIDNext, "the backend reports no PCI id for %s (planned at %s), so the device order cannot be checked", row, d.Display.Address)
 		}
 		if pci, ok := detect.CanonicalPCIAddress(ids[row]); !ok || pci != d.Display.Address {
-			return fail("backend device %s is %s, the plan expected %s (%s)", row, ids[row], d.Display.Address, d.Name)
+			return fail(next,
+				"backend device %s is %s, the plan expected %s (%s); planned order %s, backend order %s",
+				row, ids[row], d.Display.Address, d.Name, strings.Join(plannedOrder, ", "), strings.Join(backendOrder, ", "))
 		}
 	}
 	return nil
