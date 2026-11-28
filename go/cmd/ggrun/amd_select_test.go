@@ -176,6 +176,12 @@ func TestResolveGPUSelectorsAgainstTheInventory(t *testing.T) {
 	if _, err := resolveGPUSelectors(&launchRequest{GPUsFlag: "amd:0", ClaudeCode: true, ClaudeReviewerDisabled: true}, synthTwoNVIDIA(), displays); err != nil {
 		t.Fatalf("reviewer off: %v", err)
 	}
+	// GPUs detected without nvidia-smi's PCI addresses (vulkaninfo) may
+	// already hold the AMD card: refused.
+	vulkaninfo := &detect.Capabilities{GPUs: []detect.GPU{{Index: 0, Name: "AMD Test MI50 (RADV TEST)", VRAMTotalMB: synthAMDT}}}
+	if _, err := resolveGPUSelectors(&launchRequest{GPUsFlag: "amd:0"}, vulkaninfo, displays); err == nil || !strings.Contains(err.Error(), "not an NVIDIA card nvidia-smi reports") {
+		t.Fatalf("vulkaninfo detection: %v", err)
+	}
 
 	// A single-vendor host and a host without the opt-in refuse.
 	if _, err := resolveGPUSelectors(&launchRequest{GPUsFlag: "pci:0000:0a:00.0"}, synthTwoNVIDIA(), func() []detect.PCIDisplay { return synthInventory(false) }); err == nil || !strings.Contains(err.Error(), "more than one vendor") {
@@ -440,11 +446,16 @@ func TestROCmDeviceID(t *testing.T) {
 	}
 }
 
-// After load, the backend's own "using device" lines must name the planned
-// cards at their PCI addresses, or the launch stops.
+// After load, every "using device" line of the backend must name a planned
+// card at its PCI address, or the launch stops. A selected card the plan does
+// not load on prints no line. A failed start stops only on a foreign line.
 func TestPostLoadDeviceCheck(t *testing.T) {
 	rocm := &vendorSelection{Devices: []vendorDevice{{Row: "ROCm0", Name: "AMD Instinct Test", Display: detect.PCIDisplay{Address: synthAMD}}}}
 	vulkan := &vendorSelection{Devices: []vendorDevice{{Row: "Vulkan0", Name: "AMD Test MI50 (RADV TEST)", Display: detect.PCIDisplay{Address: synthAMD}}}}
+	two := &vendorSelection{Devices: []vendorDevice{
+		{Row: "ROCm0", Name: "AMD Instinct Test", Display: detect.PCIDisplay{Address: synthAMD}},
+		{Row: "ROCm1", Name: "AMD Instinct Test", Display: detect.PCIDisplay{Address: "0000:0d:00.0"}},
+	}}
 	line := func(row, desc, id string) string {
 		return "0.00.090.001 I llama_prepare_model_devices: using device " + row + " (" + desc + ") (" + id + ") - 32000 MiB free\n"
 	}
@@ -459,13 +470,16 @@ func TestPostLoadDeviceCheck(t *testing.T) {
 		{"CUDA-style id", rocm, line("ROCm0", "AMD Instinct Test", "00000000:0C:00.0"), ""},
 		{"other card", rocm, line("ROCm0", "NVIDIA Test GPU 24G", "0000:0a:00.0"), "backend device ROCm0 is 0000:0a:00.0, the plan expected 0000:0c:00.0"},
 		{"no id", rocm, line("ROCm0", "AMD Instinct Test", "unknown id"), "is unknown id"},
-		{"no line", rocm, "llama_model_loader: loaded meta data\n", `no "using device" line for ROCm0`},
+		{"no line", rocm, "llama_model_loader: loaded meta data\n", `no "using device" line (planned: ROCm0)`},
 		{"skipping line only", vulkan,
 			"llama_prepare_model_devices: skipping device Vulkan0 (X) with id 0000:0c:00.0 - already using device Vulkan1 (X) with the same id\n",
-			`no "using device" line for Vulkan0`},
-		{"extra device", rocm, line("ROCm0", "AMD Instinct Test", "0000:0c:00.0") + line("ROCm1", "AMD Instinct Test", "0000:0d:00.0"), "also uses ROCm1 (0000:0d:00.0)"},
+			`no "using device" line (planned: Vulkan0)`},
+		{"extra device", rocm, line("ROCm0", "AMD Instinct Test", "0000:0c:00.0") + line("ROCm1", "AMD Instinct Test", "0000:0d:00.0"), "uses ROCm1 (0000:0d:00.0), which the plan does not contain"},
+		{"two selected, the plan uses the second", two, line("ROCm1", "AMD Instinct Test", "0000:0d:00.0"), ""},
+		{"two selected, both used", two, line("ROCm0", "AMD Instinct Test", "0000:0c:00.0") + line("ROCm1", "AMD Instinct Test", "0000:0d:00.0"), ""},
+		{"two selected, swapped", two, line("ROCm1", "AMD Instinct Test", "0000:0c:00.0"), "backend device ROCm1 is 0000:0c:00.0, the plan expected 0000:0d:00.0"},
 	} {
-		err := checkUsingDevices(c.sel, c.log)
+		err := checkUsingDevices(c.sel, c.log, true)
 		if (c.want == "") != (err == nil) || (err != nil && !strings.Contains(err.Error(), c.want)) {
 			t.Fatalf("%s: %v, want %q", c.name, err, c.want)
 		}
@@ -481,6 +495,17 @@ func TestPostLoadDeviceCheck(t *testing.T) {
 	var mismatch *deviceOrderMismatchError
 	if err == nil || !errors.As(err, &mismatch) || verifiedConfigStaleAfter(err) {
 		t.Fatalf("a stop must keep the verified config and be a device order stop: %v", err)
+	}
+	// A failed start: no line is today's failure handling; a foreign line stops.
+	req := &launchRequest{vendorSelection: rocm}
+	if err := failedLoadDeviceCheck(req, "ggml_cuda_init: failed to initialize ROCm: no ROCm-capable device is detected\n"); err != nil {
+		t.Fatalf("failed start without lines: %v", err)
+	}
+	if err := failedLoadDeviceCheck(req, line("ROCm0", "AMD Instinct Test", "0000:0a:00.0")); err == nil || !errors.As(err, &mismatch) {
+		t.Fatalf("failed start on another card: %v", err)
+	}
+	if err := failedLoadDeviceCheck(&launchRequest{}, line("ROCm0", "AMD Instinct Test", "0000:0a:00.0")); err != nil {
+		t.Fatalf("no AMD selection: %v", err)
 	}
 }
 

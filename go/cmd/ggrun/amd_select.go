@@ -281,6 +281,17 @@ func resolveGPUSelectors(req *launchRequest, caps *detect.Capabilities, displays
 		p := picks[0]
 		return "", fmt.Errorf("--gpus %s: the card at %s is a %s GPU; only NVIDIA and AMD GPUs can be selected", flag, p.display.Address, vendorLabel(p.display.Vendor))
 	}
+	// The cards are appended after the detected GPUs, which must be the NVIDIA
+	// cards nvidia-smi reports: GPUs detected another way (vulkaninfo, without
+	// a PCI address) may already include the AMD card.
+	if caps != nil {
+		for _, g := range caps.GPUs {
+			address, ok := detect.CanonicalPCIAddress(g.PCIBusID)
+			if d, found := byAddress[address]; !ok || !found || d.Vendor != "nvidia" {
+				return "", fmt.Errorf("--gpus %s: detected GPU %d (%s) is not an NVIDIA card nvidia-smi reports with a PCI address, so an AMD card cannot be added beside it", flag, g.Index, g.Name)
+			}
+		}
+	}
 	if req.ClaudeCode && !req.ClaudeReviewerDisabled {
 		return "", fmt.Errorf("--gpus %s: the separate Claude Code reviewer is placed on the NVIDIA GPUs by index and is not supported beside an AMD selection yet; add --claude-reviewer off", flag)
 	}
@@ -612,9 +623,12 @@ type deviceOrderMismatchError struct{ msg string }
 
 func (e *deviceOrderMismatchError) Error() string { return e.msg }
 
-// checkUsingDevices requires the backend's "using device" lines to name
-// exactly the selection's rows at their planned PCI addresses.
-func checkUsingDevices(sel *vendorSelection, log string) error {
+// checkUsingDevices requires every "using device" line of the backend to name
+// a row of the selection at its planned PCI address. The backend prints lines
+// only for the devices it uses (a plan on one of two selected cards names one),
+// so a selected row without a line is fine; requireLine asks for at least one
+// line, which a successful load always prints.
+func checkUsingDevices(sel *vendorSelection, log string, requireLine bool) error {
 	if sel == nil {
 		return nil
 	}
@@ -634,20 +648,24 @@ func checkUsingDevices(sel *vendorSelection, log string) error {
 		return &deviceOrderMismatchError{msg: fmt.Sprintf(format, args...) +
 			"; the launch is stopped before serving because the backend's devices are not the plan's"}
 	}
-	planned := map[string]bool{}
+	if requireLine && len(order) == 0 {
+		rows := make([]string, 0, len(sel.Devices))
+		for _, d := range sel.Devices {
+			rows = append(rows, d.Row)
+		}
+		return fail("the backend printed no \"using device\" line (planned: %s)", strings.Join(rows, ", "))
+	}
+	planned := map[string]vendorDevice{}
 	for _, d := range sel.Devices {
-		planned[d.Row] = true
-		id, ok := ids[d.Row]
-		if !ok {
-			return fail("the backend printed no \"using device\" line for %s (planned: %s at %s)", d.Row, d.Name, d.Display.Address)
-		}
-		if pci, ok := detect.CanonicalPCIAddress(id); !ok || pci != d.Display.Address {
-			return fail("backend device %s is %s, the plan expected %s (%s)", d.Row, id, d.Display.Address, d.Name)
-		}
+		planned[d.Row] = d
 	}
 	for _, row := range order {
-		if !planned[row] {
-			return fail("the backend also uses %s (%s), which the plan does not contain", row, ids[row])
+		d, ok := planned[row]
+		if !ok {
+			return fail("the backend uses %s (%s), which the plan does not contain", row, ids[row])
+		}
+		if pci, ok := detect.CanonicalPCIAddress(ids[row]); !ok || pci != d.Display.Address {
+			return fail("backend device %s is %s, the plan expected %s (%s)", row, ids[row], d.Display.Address, d.Name)
 		}
 	}
 	return nil
@@ -663,5 +681,14 @@ func postLoadDeviceCheck(req *launchRequest, p *server.Process) error {
 	if p != nil && p.LogBuf != nil {
 		log = p.LogBuf.String()
 	}
-	return admissionUnknown(checkUsingDevices(req.vendorSelection, log))
+	return admissionUnknown(checkUsingDevices(req.vendorSelection, log, true))
+}
+
+// failedLoadDeviceCheck is the same check on a failed start: lines naming
+// other devices stop the launch; no line at all is today's failure handling.
+func failedLoadDeviceCheck(req *launchRequest, log string) error {
+	if req == nil || req.vendorSelection == nil {
+		return nil
+	}
+	return admissionUnknown(checkUsingDevices(req.vendorSelection, log, false))
 }

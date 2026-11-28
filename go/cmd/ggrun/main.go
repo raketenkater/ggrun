@@ -5709,6 +5709,13 @@ func startLaunchWithCUDAOOMRecoveryStateMode(req *launchRequest, cfg *config.Con
 		var measuredComputeByGPU map[int]int
 		if p != nil && p.LogBuf != nil {
 			logData = p.LogBuf.String()
+			// A failed load on devices other than the planned ones (an AMD
+			// selection) is not evidence about the plan: stop before it is
+			// recorded or recovered from.
+			if orderErr := failedLoadDeviceCheck(req, logData); orderErr != nil {
+				_ = p.Stop()
+				return nil, strategy, serverArgs, orderErr
+			}
 			measuredComputeByGPU = recordMeasuredLaunchProbes(req, cfg, model, strategy, be, runtimeCaps, logData, nil, serverProcessPID(p))
 		}
 		// Diagnose before checking the retry budget: a clean, parseable OOM on
