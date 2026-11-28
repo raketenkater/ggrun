@@ -30,10 +30,10 @@ type PCIDisplay struct {
 	VRAMTotalMB int    `json:"vram_total_mb,omitempty"`
 	VRAMUsedMB  int    `json:"vram_used_mb,omitempty"`
 	MemoryNote  string `json:"memory_note,omitempty"`
-	// LinkGen and LinkWidth describe the slot link: read on the topmost PCI
-	// function of the card (a card with its own PCIe switch reports the
-	// switch's internal link on the GPU function), with the generation capped
-	// by the bridge above it. LinkAt is the function they were read on.
+	// LinkGen and LinkWidth are the slot link's current speed and width, read
+	// on the bridge above the card (a card with its own PCIe switch reports
+	// the switch's internal link on the GPU function). An idle link may run
+	// slower than it can. LinkAt is the function they were read on.
 	LinkGen   int    `json:"link_gen,omitempty"`
 	LinkWidth int    `json:"link_width,omitempty"`
 	LinkAt    string `json:"link_at,omitempty"`
@@ -80,10 +80,16 @@ var amdPCIDeviceNames = map[string]string{
 	"0x74a5": "AMD Instinct MI325X",
 }
 
+// pciGPUDrivers are the kernel GPU drivers that may drive a class 0x12
+// function (compute-only Instinct and data-center parts).
+var pciGPUDrivers = map[string]bool{"amdgpu": true, "nvidia": true}
+
 var pciVendorNames = map[string]string{"0x10de": "nvidia", "0x1002": "amd", "0x8086": "intel"}
 
-// ReadPCIDisplays parses the display (class 0x03) and processing-accelerator
-// (class 0x12) functions under root/sys/bus/pci/devices, sorted by address.
+// ReadPCIDisplays parses the display (class 0x03) functions, and the
+// processing-accelerator (class 0x12) functions a GPU driver drives, under
+// root/sys/bus/pci/devices, sorted by address; SR-IOV virtual functions are
+// left out.
 // root is "/" on a host and a fixture directory in tests. Every value is a
 // plain file read; a missing attribute leaves its field unknown.
 func ReadPCIDisplays(root string) ([]PCIDisplay, error) {
@@ -104,6 +110,11 @@ func ReadPCIDisplays(root string) ([]PCIDisplay, error) {
 		if !strings.HasPrefix(class, "0x03") && !strings.HasPrefix(class, "0x12") {
 			continue
 		}
+		// An SR-IOV virtual function is a slice of a card already listed
+		// through its physical function.
+		if _, err := os.Lstat(filepath.Join(dir, "physfn")); err == nil {
+			continue
+		}
 		d := PCIDisplay{
 			Address:  address,
 			VendorID: strings.ToLower(readSysfs(dir, "vendor")),
@@ -116,6 +127,11 @@ func ReadPCIDisplays(root string) ([]PCIDisplay, error) {
 		}
 		if target, err := os.Readlink(filepath.Join(dir, "driver")); err == nil {
 			d.Driver = filepath.Base(target)
+		}
+		// Class 0x12 is any processing accelerator (an NPU, for one); it is a
+		// GPU only when a GPU driver drives it.
+		if strings.HasPrefix(class, "0x12") && !pciGPUDrivers[d.Driver] {
+			continue
 		}
 		d.Name = pciDisplayName(d)
 		if d.Driver == "amdgpu" {
@@ -167,9 +183,11 @@ func readAMDGPUMemory(dir string, d *PCIDisplay) {
 }
 
 // readSlotLink walks up from the GPU function through PCI functions of the
-// same vendor (the card's own PCIe switch) and reads the link of the topmost
-// one, which is the slot link. Its generation is the lower of its own maximum
-// and that of the bridge above it, so a Gen 4 card in a Gen 3 slot reads 3.
+// same vendor (the card's own PCIe switch, whose internal link the GPU
+// function reports) to the card's topmost function, and reads the slot link
+// on the bridge above it: its current speed and width, as negotiated now
+// (an idle link may run slower). Without such a bridge (a root-complex
+// integrated device) the topmost function's own current values are used.
 func readSlotLink(dir string, d *PCIDisplay) {
 	resolved, err := filepath.EvalSymlinks(dir)
 	if err != nil {
@@ -186,25 +204,19 @@ func readSlotLink(dir string, d *PCIDisplay) {
 		}
 		top = parent
 	}
-	gen := pcieGenFromSpeed(readSysfs(top, "max_link_speed"))
-	bridge := filepath.Dir(top)
-	if _, ok := CanonicalPCIAddress(filepath.Base(bridge)); ok {
-		if bridgeGen := pcieGenFromSpeed(readSysfs(bridge, "max_link_speed")); bridgeGen > 0 && (gen == 0 || bridgeGen < gen) {
-			gen = bridgeGen
+	at := top
+	if bridge := filepath.Dir(top); pcieGenFromSpeed(readSysfs(bridge, "current_link_speed")) > 0 {
+		if _, ok := CanonicalPCIAddress(filepath.Base(bridge)); ok {
+			at = bridge
 		}
 	}
-	if gen == 0 {
-		gen = pcieGenFromSpeed(readSysfs(top, "current_link_speed"))
-	}
-	width, _ := readSysfsInt(top, "current_link_width")
-	if width <= 0 {
-		width, _ = readSysfsInt(top, "max_link_width")
-	}
+	gen := pcieGenFromSpeed(readSysfs(at, "current_link_speed"))
+	width, _ := readSysfsInt(at, "current_link_width")
 	if gen <= 0 || width <= 0 {
 		return
 	}
 	d.LinkGen, d.LinkWidth = gen, int(width)
-	if address, ok := CanonicalPCIAddress(filepath.Base(top)); ok {
+	if address, ok := CanonicalPCIAddress(filepath.Base(at)); ok {
 		d.LinkAt = address
 	}
 }

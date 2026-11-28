@@ -158,7 +158,7 @@ func planLaunch(req *launchRequest, in planInputs) (*launchPlan, *planError) {
 			// Never for an inventory plan: it reads nothing from this host.
 			if !fromInventory && in.ListVulkanUnder != nil && vulkanRestrictionApplies(be, caps, in.HostDisplays) {
 				var restrictNote string
-				key, value, restrictNote, vkErr = restrictedVulkanDeviceOrder(req, be, caps, listed, func(visible string) ([]listedDevice, error) {
+				key, value, restrictNote, vkErr = restrictedVulkanDeviceOrder(req, be, caps, listed, func(visible string) (string, error) {
 					return in.ListVulkanUnder(be.Path, visible)
 				})
 				if restrictNote != "" {
@@ -326,9 +326,10 @@ type planInputs struct {
 	ListVulkan     func(path string) ([]listedDevice, error)
 	// HostDisplays and ListVulkanUnder serve the Vulkan restriction
 	// (vulkanRestrictionApplies): this host's PCI display inventory and a
-	// listing under a given GGML_VK_VISIBLE_DEVICES. Nil leaves today's order.
+	// listing's output under a given GGML_VK_VISIBLE_DEVICES. Nil leaves
+	// today's order.
 	HostDisplays    func() []detect.PCIDisplay
-	ListVulkanUnder func(path, visible string) ([]listedDevice, error)
+	ListVulkanUnder func(path, visible string) (string, error)
 	// Note receives each note when it happens, so a sink that prints keeps
 	// today's order against the lines the called functions print directly.
 	Note func(planNote)
@@ -343,7 +344,7 @@ func dryRunPlanInputs(note func(planNote)) planInputs {
 		ResolveBackend:  resolveLaunchBackend,
 		ListVulkan:      listVulkanDevices,
 		HostDisplays:    detect.HostPCIDisplays,
-		ListVulkanUnder: listVulkanDevicesUnder,
+		ListVulkanUnder: listVulkanOutputUnder,
 		Note:            note,
 	}
 }

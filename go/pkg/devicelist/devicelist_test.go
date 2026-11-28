@@ -57,9 +57,9 @@ func TestRunKeysOnEnvironmentAndTimeout(t *testing.T) {
 
 // A rewritten binary at the same path is listed again.
 func TestRunListsARewrittenBinaryAgain(t *testing.T) {
-	bin := fakeBackend(t, "echo '  CUDA0: old'\n")
+	bin := fakeBackend(t, "echo 'Available devices:'; echo '  CUDA0: old'\n")
 	old := Run(Probe{Binary: bin, Timeout: 10 * time.Second})
-	if err := os.WriteFile(bin, []byte("#!/bin/sh\necho '  CUDA0: new'\n"), 0o755); err != nil {
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\necho 'Available devices:'; echo '  CUDA0: new'\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	fresh := Run(Probe{Binary: bin, Timeout: 10 * time.Second})
@@ -150,5 +150,58 @@ func TestRunMissingBinary(t *testing.T) {
 	Run(Probe{Binary: missing, Timeout: time.Second})
 	if got := StartedListings() - before; got != 2 {
 		t.Fatalf("started %d listings, want 2", got)
+	}
+}
+
+// A clean answer that names only the CPU (a driver that was not ready) is
+// asked again; so is any answer older than the TTL.
+func TestRunDoesNotKeepCPUOnlyOrOldAnswers(t *testing.T) {
+	cpu := fakeBackend(t, "echo 'Available devices:'; echo '  (none)'\n")
+	before := StartedListings()
+	Run(Probe{Binary: cpu, Timeout: 10 * time.Second})
+	Run(Probe{Binary: cpu, Timeout: 10 * time.Second})
+	if got := StartedListings() - before; got != 2 {
+		t.Fatalf("started %d listings for a CPU-only answer, want 2", got)
+	}
+
+	gpu := fakeBackend(t, "echo 'Available devices:'; echo '  Vulkan0: GPU (1000 MiB, 1 MiB free)'\n")
+	clock := time.Now()
+	now = func() time.Time { return clock }
+	t.Cleanup(func() { now = time.Now })
+	before = StartedListings()
+	Run(Probe{Binary: gpu, Timeout: 10 * time.Second})
+	clock = clock.Add(cacheTTL / 2)
+	Run(Probe{Binary: gpu, Timeout: 10 * time.Second})
+	clock = clock.Add(cacheTTL)
+	Run(Probe{Binary: gpu, Timeout: 10 * time.Second})
+	if got := StartedListings() - before; got != 2 {
+		t.Fatalf("started %d listings, want 2 (one cached within the TTL, one after it)", got)
+	}
+}
+
+// A rebuilt library beside an unchanged server binary is listed again.
+func TestRunListsAgainAfterALibraryChanges(t *testing.T) {
+	bin := fakeBackend(t, "echo 'Available devices:'; echo '  CUDA0: GPU'\n")
+	lib := filepath.Join(filepath.Dir(bin), "libggml-cuda.so")
+	if err := os.WriteFile(lib, []byte("one"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	before := StartedListings()
+	Run(Probe{Binary: bin, Timeout: 10 * time.Second})
+	if err := os.WriteFile(lib, []byte("rebuilt"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	Run(Probe{Binary: bin, Timeout: 10 * time.Second})
+	if got := StartedListings() - before; got != 2 {
+		t.Fatalf("started %d listings, want 2", got)
+	}
+}
+
+// Zero sets no bound: a listing slower than any default still answers.
+func TestRunZeroTimeoutIsUnbounded(t *testing.T) {
+	bin := fakeBackend(t, "sleep 1; echo 'Available devices:'; echo '  CUDA0: slow'\n")
+	res := Run(Probe{Binary: bin})
+	if res.TimedOut || res.Err != nil || !strings.Contains(res.Output, "CUDA0: slow") {
+		t.Fatalf("result = %+v", res)
 	}
 }

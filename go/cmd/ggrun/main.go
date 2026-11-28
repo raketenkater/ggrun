@@ -642,11 +642,10 @@ func cmdDetect(args []string) {
 	flags := flag.NewFlagSet("detect", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
 	flags.Usage = func() {
-		fmt.Fprintln(os.Stderr, "Usage: ggrun detect [--bandwidth | --pci]")
+		fmt.Fprintln(os.Stderr, "Usage: ggrun detect [--bandwidth]")
 		flags.PrintDefaults()
 	}
 	measureBandwidth := flags.Bool("bandwidth", false, "measure and cache host/CUDA transfer bandwidth")
-	listPCI := flags.Bool("pci", false, "print the operating system's PCI GPU inventory (Linux) instead of the detected GPUs")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return
@@ -654,18 +653,8 @@ func cmdDetect(args []string) {
 		os.Exit(2)
 	}
 	if flags.NArg() != 0 {
-		fmt.Fprintln(os.Stderr, "Usage: ggrun detect [--bandwidth | --pci]")
+		fmt.Fprintln(os.Stderr, "Usage: ggrun detect [--bandwidth]")
 		os.Exit(2)
-	}
-	if *listPCI {
-		displays, err := detect.ReadPCIDisplays("/")
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
-		}
-		data, _ := json.MarshalIndent(displays, "", "  ")
-		fmt.Println(string(data))
-		return
 	}
 	caps, err := detect.Detect()
 	if err != nil {

@@ -643,18 +643,14 @@ func helpHasExactFlag(help, flag string) bool {
 }
 
 // claudeReviewerListDevices lists the reviewer backend's devices under the
-// reviewer's own environment. The listing is bounded (it had no bound before)
-// and shared with any identical listing earlier in this process.
+// reviewer's own environment, without a bound (as before the shared probe),
+// and shares a clean answer with an identical listing earlier in this process.
 func claudeReviewerListDevices(binary string, env []string) (string, error) {
 	args := []string{binary, "--list-devices"}
 	listing := devicelist.Run(devicelist.Probe{
-		Binary:  binary,
-		Env:     server.OverrideEnv(server.ChildEnv(os.Environ(), args), env),
-		Timeout: devicelist.DefaultTimeout,
+		Binary: binary,
+		Env:    server.OverrideEnv(server.ChildEnv(os.Environ(), args), env),
 	})
-	if listing.TimedOut {
-		return "", fmt.Errorf("probe %s --list-devices: no answer within %s", binary, devicelist.DefaultTimeout)
-	}
 	if listing.Err != nil {
 		return "", fmt.Errorf("probe %s --list-devices: %w: %s", binary, listing.Err, strings.TrimSpace(listing.Output))
 	}

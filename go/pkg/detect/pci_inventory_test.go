@@ -48,10 +48,10 @@ func fixtureFunction(t *testing.T, root, parent, address, driver string, attrs m
 	return dir
 }
 
-// fixtureHost is a two-vendor host as its kernel lists it:
-// RTX 3090 Ti at 65:00.0 and RTX 3060 at b3:00.0, an MI50 32 GB at 19:00.0
-// behind its own PCIe switch (17:00.0 upstream, 18:00.0 downstream) in a
-// Gen 3 slot, and the board's BMC display. amdgpuDriver binds the MI50.
+// fixtureHost is a synthetic two-vendor host as its kernel would list it: two
+// NVIDIA cards, an AMD Vega 20 card behind its own PCIe switch (upstream and
+// downstream port) in a Gen 3 slot, a BMC display, an NPU and an SR-IOV
+// virtual function. amdgpuDriver binds the AMD card.
 func fixtureHost(t *testing.T, amdgpuDriver string, amdAttrs map[string]string) string {
 	t.Helper()
 	if runtime.GOOS == "windows" {
@@ -63,7 +63,8 @@ func fixtureHost(t *testing.T, amdgpuDriver string, amdAttrs map[string]string) 
 	pch := fixtureFunction(t, root, filepath.Join(devices, "pci0000:00"), "0000:00:1c.0", "pcieport", map[string]string{"vendor": "0x8086", "max_link_speed": "8.0 GT/s PCIe"})
 	fixtureFunction(t, root, pch, "0000:03:00.0", "ast", map[string]string{"vendor": "0x1a03", "device": "0x2000", "class": "0x030000"})
 	// MI50 behind its own switch.
-	port := fixtureFunction(t, root, filepath.Join(devices, "pci0000:16"), "0000:16:00.0", "pcieport", map[string]string{"vendor": "0x8086", "max_link_speed": "8.0 GT/s PCIe"})
+	port := fixtureFunction(t, root, filepath.Join(devices, "pci0000:16"), "0000:16:00.0", "pcieport", map[string]string{
+		"vendor": "0x8086", "max_link_speed": "8.0 GT/s PCIe", "current_link_speed": "8.0 GT/s PCIe", "current_link_width": "16"})
 	up := fixtureFunction(t, root, port, "0000:17:00.0", "pcieport", map[string]string{
 		"vendor": "0x1002", "max_link_speed": "16.0 GT/s PCIe", "current_link_speed": "8.0 GT/s PCIe", "current_link_width": "16", "max_link_width": "16"})
 	down := fixtureFunction(t, root, up, "0000:18:00.0", "pcieport", map[string]string{
@@ -79,16 +80,24 @@ func fixtureHost(t *testing.T, amdgpuDriver string, amdAttrs map[string]string) 
 	}
 	fixtureFunction(t, root, down, "0000:19:00.0", amdgpuDriver, attrs)
 	// NVIDIA cards, link idle at 2.5 GT/s.
-	for _, card := range []struct{ port, address, device, width string }{
-		{"0000:64:00.0", "0000:65:00.0", "0x2203", "16"},
-		{"0000:b2:00.0", "0000:b3:00.0", "0x2504", "8"},
+	for _, card := range []struct{ port, address, device, width, slotSpeed string }{
+		{"0000:64:00.0", "0000:65:00.0", "0x2203", "16", "8.0 GT/s PCIe"},
+		{"0000:b2:00.0", "0000:b3:00.0", "0x2504", "8", "2.5 GT/s PCIe"}, // idle
 	} {
-		bridge := fixtureFunction(t, root, filepath.Join(devices, "pci0000:"+card.port[5:7]), card.port, "pcieport", map[string]string{"vendor": "0x8086", "max_link_speed": "8.0 GT/s PCIe"})
+		bridge := fixtureFunction(t, root, filepath.Join(devices, "pci0000:"+card.port[5:7]), card.port, "pcieport", map[string]string{
+			"vendor": "0x8086", "max_link_speed": "8.0 GT/s PCIe", "current_link_speed": card.slotSpeed, "current_link_width": card.width})
 		fixtureFunction(t, root, bridge, card.address, "nvidia", map[string]string{
 			"vendor": "0x10de", "device": card.device, "class": "0x030000",
 			"max_link_speed": "16.0 GT/s PCIe", "current_link_speed": "2.5 GT/s PCIe", "current_link_width": card.width})
 		fixtureFunction(t, root, bridge, card.address[:len(card.address)-1]+"1", "snd_hda_intel", map[string]string{
 			"vendor": "0x10de", "device": "0x1aef", "class": "0x040300"})
+	}
+	// Not GPUs: an NPU (class 0x12, intel_vpu) and an SR-IOV virtual function
+	// of a display device.
+	fixtureFunction(t, root, pch, "0000:00:0b.0", "intel_vpu", map[string]string{"vendor": "0x8086", "device": "0x7d1d", "class": "0x120000"})
+	vf := fixtureFunction(t, root, pch, "0000:04:00.1", "", map[string]string{"vendor": "0x1002", "device": "0x7461", "class": "0x038000"})
+	if err := os.Symlink(filepath.Join(pch, "0000:03:00.0"), filepath.Join(vf, "physfn")); err != nil {
+		t.Fatal(err)
 	}
 	// KFD topology: node 0 is the CPU, node 1 the MI50 (location_id 0x1900).
 	kfd := filepath.Join(root, "sys", "class", "kfd", "kfd", "topology", "nodes")
@@ -124,14 +133,14 @@ func TestReadPCIDisplaysOnTheReferenceHost(t *testing.T) {
 		{Address: "0000:19:00.0", Vendor: "amd", VendorID: "0x1002", DeviceID: "0x66a1", Class: "0x038000",
 			Name: "AMD Radeon Pro VII / Radeon Instinct MI50 (Vega 20)", Driver: "amdgpu",
 			VRAMTotalMB: 32752, VRAMUsedMB: 10,
-			// The GPU function says Gen 4 x16 (the card's switch); the slot is
-			// read on the switch's upstream port and capped by the Gen 3 root port.
-			LinkGen: 3, LinkWidth: 16, LinkAt: "0000:17:00.0",
+			// The GPU function says Gen 4 x16 (the card's switch); the slot
+			// link is read on the root port above the switch's upstream port.
+			LinkGen: 3, LinkWidth: 16, LinkAt: "0000:16:00.0",
 			KFDUniqueID: "0123456789abcdef", GFXTarget: "gfx906"},
 		{Address: "0000:65:00.0", Vendor: "nvidia", VendorID: "0x10de", DeviceID: "0x2203", Class: "0x030000", Name: "NVIDIA GPU 0x2203", Driver: "nvidia",
-			LinkGen: 3, LinkWidth: 16, LinkAt: "0000:65:00.0"},
+			LinkGen: 3, LinkWidth: 16, LinkAt: "0000:64:00.0"},
 		{Address: "0000:b3:00.0", Vendor: "nvidia", VendorID: "0x10de", DeviceID: "0x2504", Class: "0x030000", Name: "NVIDIA GPU 0x2504", Driver: "nvidia",
-			LinkGen: 3, LinkWidth: 8, LinkAt: "0000:b3:00.0"},
+			LinkGen: 1, LinkWidth: 8, LinkAt: "0000:b2:00.0"},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("inventory:\n got %+v\nwant %+v", got, want)
@@ -159,6 +168,18 @@ func TestReadPCIDisplaysLeavesASuspendedCardAsleep(t *testing.T) {
 	}
 	if got[1].VRAMTotalMB != 0 || got[1].VRAMUsedMB != 0 || !strings.Contains(got[1].MemoryNote, "suspended") {
 		t.Fatalf("suspended card = %+v", got[1])
+	}
+}
+
+// A compute-only part in class 0x12 counts when a GPU driver drives it.
+func TestReadPCIDisplaysKeepsAGPUDrivenAccelerator(t *testing.T) {
+	root := fixtureHost(t, "amdgpu", map[string]string{"class": "0x120000"})
+	got, err := ReadPCIDisplays(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 4 || got[1].Address != "0000:19:00.0" || got[1].Class != "0x120000" {
+		t.Fatalf("inventory = %+v", got)
 	}
 }
 
